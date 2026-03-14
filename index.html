@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<script src="/socket.io/socket.io.js"></script>
+    <meta charset="UTF-8">
+    <title>坦克突击：全武装对决</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="setup-ui">
+        <div class="setup-card">
+            <h1>BATTLE TANK</h1>
+            <p class="setup-desc">2–4 人联机坦克对决。先点击“准备”，待所有玩家均准备后，由主机点击“开始游戏”开局。</p>
+            <div class="toggle-list">
+                <div class="toggle-item">
+                    <button id="ready-btn" class="toggle-btn active" type="button">准备</button>
+                </div>
+                <div class="toggle-item">
+                    <button id="start-game-btn" class="toggle-btn" type="button" disabled>开始游戏</button>
+                </div>
+                <div class="toggle-item">
+                    <button id="open-settings" class="toggle-btn active" type="button">游戏设置</button>
+                </div>
+                <div class="toggle-item">
+                    <button id="open-keybind" class="keybind-open-btn" type="button">⌨ 键位设置</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="settings-modal">
+        <div class="keybind-panel">
+            <h2>游戏设置</h2>
+            <p class="keybind-tip">以下设置以主机（P1）为准，开局后会同步给所有玩家。</p>
+            <div class="toggle-list">
+                <div class="toggle-item">
+                    <button id="collision-damage" class="toggle-btn active" type="button">碰撞伤害</button>
+                </div>
+                <div class="toggle-item">
+                    <button id="poison-circle" class="toggle-btn active" type="button">毒圈</button>
+                </div>
+                <div class="toggle-item">
+                    <button id="bullet-spread" class="toggle-btn active" type="button">弹道偏移</button>
+                </div>
+                <div class="toggle-item">
+                    <button id="mine-system" class="toggle-btn active" type="button">地雷系统</button>
+                </div>
+                <div class="toggle-item">
+                    <button id="satellite-laser" class="toggle-btn" type="button">卫星激光炮</button>
+                </div>
+            </div>
+            <div style="margin-top:14px;color:#e0e8ff;font-size:13px;">
+                建筑物数量：
+                <input id="building-count" type="number" min="0" max="20" value="6" style="width:72px;margin-left:8px;padding:6px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:white;pointer-events:auto;">
+            </div>
+            <button id="close-settings" class="keybind-close-btn" type="button">确定</button>
+        </div>
+    </div>
+
+    <div id="keybind-modal">
+        <div class="keybind-panel">
+            <h2>键位设置</h2>
+            <p class="keybind-tip">点击按键格后直接按下新按键。若与任意现有功能冲突，将自动与原绑定互换；按 Esc 取消。</p>
+            <div id="keybind-grid" class="keybind-grid"></div>
+            <div id="keybind-warning"></div>
+            <button class="keybind-close-btn" type="button">确定</button>
+        </div>
+    </div>
+
+    <div id="ui">
+        <div class="hud-row">
+            <div class="p-info" id="hud-p1">
+                <div class="p-name p1-color">蓝色坦克 (P1)</div>
+                <div class="hud-meta">
+                    <span id="p1-hp-text">HP 100</span>
+                    <span id="p1-weapon-text" class="weapon-tag">武器：机枪</span>
+                </div>
+                <div class="hp-bar"><div id="p1-hp" class="hp-fill"></div></div>
+                <div class="stamina-wrap" id="stamina-wrap">
+                    <div class="stamina-label">
+                        <span>体力</span>
+                        <span id="stamina-text">100</span>
+                    </div>
+                    <div class="stamina-bar"><div id="stamina-fill" class="stamina-fill"></div></div>
+                </div>
+            </div>
+            <div class="p-info" id="hud-p3">
+                <div class="p-name p3-color">绿色坦克 (P3)</div>
+                <div class="hud-meta">
+                    <span id="p3-hp-text">HP 100</span>
+                    <span id="p3-weapon-text" class="weapon-tag">武器：机枪</span>
+                </div>
+                <div class="hp-bar"><div id="p3-hp" class="hp-fill"></div></div>
+            </div>
+            <div class="p-info" id="hud-p2">
+                <div class="p-name p2-color">红色坦克 (P2)</div>
+                <div class="hud-meta">
+                    <span id="p2-hp-text">HP 100</span>
+                    <span id="p2-weapon-text" class="weapon-tag">武器：机枪</span>
+                </div>
+                <div class="hp-bar"><div id="p2-hp" class="hp-fill"></div></div>
+            </div>
+            <div class="p-info" id="hud-p4">
+                <div class="p-name p4-color">黄色坦克 (P4)</div>
+                <div class="hud-meta">
+                    <span id="p4-hp-text">HP 100</span>
+                    <span id="p4-weapon-text" class="weapon-tag">武器：机枪</span>
+                </div>
+                <div class="hp-bar"><div id="p4-hp" class="hp-fill"></div></div>
+            </div>
+        </div>
+        <div id="poison-timer">毒圈: 150s</div>
+    </div>
+
+    <div id="control-guide">
+        <div class="guide-column">
+            <h3 class="p1-color">蓝色坦克 (P1) 操作</h3>
+            <p>W/S - 前进/后退</p>
+            <p>A/D - 左右转向</p>
+            <p>空格键 - 开火</p>
+            <p>Q - 切换武器</p>
+            <p>E - 开关瞄准镜</p>
+            <p>双击方向键 - 加速移动</p>
+        </div>
+        <div class="guide-column">
+            <h3 class="p2-color">红色坦克 (P2) 操作</h3>
+            <p>↑/↓ - 前进/后退</p>
+            <p>←/→ - 左右转向</p>
+            <p>回车键 - 开火</p>
+            <p>' (单引号) - 切换武器</p>
+            <p>\ (反斜杠) - 开关瞄准镜</p>
+            <p>双击方向键 - 加速移动</p>
+        </div>
+    </div>
+
+    <canvas id="minimap-canvas"></canvas>
+    <canvas id="scope-canvas"></canvas>
+
+    <div id="scoreboard">
+        <div id="scoreboard-title">比分榜</div>
+        <div id="scoreboard-body"></div>
+    </div>
+
+    <div id="player-status">
+        <div id="player-status-title">玩家状态</div>
+        <div id="player-status-body"></div>
+    </div>
+
+    <div id="winner-msg">
+        <h1 id="win-text"></h1>
+        <div class="winner-btns">
+            <button id="btn-back-menu" type="button">回到主菜单</button>
+            <button id="btn-next-round" type="button">下一局</button>
+        </div>
+    </div>
+
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
+    
+
+    <script type="module" src="game.js"></script>
+</body>
+</html>

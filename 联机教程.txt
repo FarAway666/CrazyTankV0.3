@@ -1,0 +1,7 @@
+1.下载node.js,游戏双方连接到同一局域网
+2.在文件夹里右键运行终端（bash）
+3.输入npm install express socket.io安装必要库，安装完输入node server.js启动服务器
+4.在自己电脑浏览器访问http://localhost:3000，对方电脑浏览器地址栏输入 http://你的IP:3000
+（你的ip获取方式：cmd命令行输入ipconfig）
+
+wzr与hsq共同研发 版权所有©侵权必究
