@@ -4,7 +4,7 @@ const http = require('http').Server(app);
 const io = require('socket.io')(http);
 const path = require('path');
 
-app.use(express.static(__dirname));
+app.use(express.static(__dirname, { dotfiles: 'allow' }));
 
 let players = {};
 // 支持 p1 / p2 / p3 / p4 四个角色，按顺序轮流分配
@@ -22,7 +22,7 @@ function getDefaultConfig() {
         poisonCircleEnabled: true,
         bulletSpreadEnabled: true,
         minesEnabled: true,
-        satelliteLaserEnabled: false,
+        satelliteLaserEnabled: true,
         buildingCount: 6
     };
 }
@@ -119,6 +119,45 @@ io.on('connection', (socket) => {
         if (reporterRole !== 'p1') return;
         if (!data || !data.targetRole || typeof data.dmg !== 'number') return;
         io.emit('hit_sync', data);
+    });
+
+    // 轨道炮发射请求：非主机上报目标点，由主机客户端进行权威命中判定
+    socket.on('satellite_fire', (data) => {
+        const reporterRole = players[socket.id];
+        if (!reporterRole) return;
+        if (!data || data.shooterRole !== reporterRole) return;
+        if (typeof data.targetX !== 'number' || typeof data.targetZ !== 'number') return;
+        io.emit('satellite_fire', {
+            shooterRole: data.shooterRole,
+            targetX: data.targetX,
+            targetZ: data.targetZ,
+            dmg: data.dmg
+        });
+    });
+
+    // 轨道炮预警开始：全员可见轨道炮发射前提示和特效
+    socket.on('satellite_strike_start', (data) => {
+        const reporterRole = players[socket.id];
+        if (!reporterRole) return;
+        if (!data || data.shooterRole !== reporterRole) return;
+        if (typeof data.targetX !== 'number' || typeof data.targetZ !== 'number') return;
+        io.emit('satellite_strike_start', {
+            shooterRole: data.shooterRole,
+            targetX: data.targetX,
+            targetZ: data.targetZ,
+            startAt: typeof data.startAt === 'number' ? data.startAt : Date.now()
+        });
+    });
+
+    // 卫星道具拾取同步：任意玩家拾取后，全员视角立即隐藏该道具
+    socket.on('satellite_pickup', (data) => {
+        const reporterRole = players[socket.id];
+        if (!reporterRole) return;
+        if (!data || data.role !== reporterRole) return;
+        io.emit('satellite_pickup', {
+            role: reporterRole,
+            at: typeof data.at === 'number' ? data.at : Date.now()
+        });
     });
 
     // 转发武器切换，同步多方武器状态

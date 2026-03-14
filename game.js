@@ -8,7 +8,7 @@ import {
     MINIMAP_RADIUS,
     MG_SPREAD_ANGLE, CANNON_SPREAD_ANGLE, SHOTGUN_SPREAD_ANGLE,
     SCOPE_FOV, NORMAL_FOV, SCOPE_SPEED_MULT, SCOPE_TURN_MULT,
-    SATELLITE_TARGET_SPEED, SATELLITE_RADIUS, SATELLITE_DAMAGE, SATELLITE_EFFECT_MS, SATELLITE_RESPAWN,
+    SATELLITE_TARGET_SPEED, SATELLITE_RADIUS, SATELLITE_DAMAGE, SATELLITE_WARNING_MS, SATELLITE_EFFECT_MS, SATELLITE_RESPAWN,
     PLAYER_KEYS, ACTION_LABELS, DEFAULT_KEYS, WEAPONS
 } from './game-const.js';
 
@@ -114,7 +114,9 @@ import {
         };
 
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x87CEEB);
+        const SKY_BG_COLOR = new THREE.Color(0x87CEEB);
+        const BLIND_BG_COLOR = new THREE.Color(0x000000);
+        scene.background = SKY_BG_COLOR;
 
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
@@ -127,6 +129,296 @@ import {
         const minimapCtx = minimapCanvas.getContext('2d');
         const scopeCanvas = document.getElementById('scope-canvas');
         const scopeCtx = scopeCanvas.getContext('2d');
+        const blindOverlayCanvas = document.getElementById('blind-overlay');
+        const blindOverlayCtx = blindOverlayCanvas ? blindOverlayCanvas.getContext('2d') : null;
+        const AUDIO_FILES = {
+            sniperFire: '狙击炮.mp3',
+            mgFire: '机枪.mp3',
+            shotgunFire: '霰弹炮.mp3',
+            cannonCooldown: '狙击炮冷却时.mp3',
+            freezeFire: '冰冻炮.mp3',
+            toxicFire: '剧毒炮.mp3',
+            blindFire: '致盲弹.mp3',
+            blindStatus: '致盲音效.mp3',
+            satelliteExplosion: '卫星轨道炮爆炸.mp3',
+            pickupSatellite: '拾取卫星轨道炮.mp3',
+            pickupHealth: '拾取血包.mp3',
+            hit: '被击中.mp3',
+            lowHp: '低血量.mp3',
+            deathExplosion: '死亡爆炸.mp3',
+            nearMiss: '子弹距离自己很近但未命中.mp3'
+        };
+        const sfxPool = {};
+        const sfxLastPlayAt = {};
+        const sfxStopTimers = {};
+        let audioUnlocked = false;
+        let lowHpLooping = false;
+        let blindStatusLooping = false;
+
+        function initAudioPool() {
+            for (const [key, filename] of Object.entries(AUDIO_FILES)) {
+                const audio = new Audio(`/.radio/${encodeURIComponent(filename)}`);
+                audio.preload = 'auto';
+                if (key === 'lowHp') audio.loop = true;
+                if (key === 'blindStatus') audio.loop = true;
+                sfxPool[key] = audio;
+            }
+        }
+
+        function unlockAudioOnce() {
+            if (audioUnlocked) return;
+            audioUnlocked = true;
+            for (const audio of Object.values(sfxPool)) {
+                audio.muted = true;
+                const p = audio.play();
+                if (p && typeof p.then === 'function') {
+                    p.then(() => {
+                        audio.pause();
+                        audio.currentTime = 0;
+                        audio.muted = false;
+                    }).catch(() => {
+                        audio.muted = false;
+                    });
+                } else {
+                    audio.muted = false;
+                }
+            }
+            window.removeEventListener('pointerdown', unlockAudioOnce);
+            window.removeEventListener('keydown', unlockAudioOnce);
+            window.removeEventListener('touchstart', unlockAudioOnce);
+        }
+
+        function playSfx(key, { volume = 0.8, cooldownMs = 0 } = {}) {
+            const audio = sfxPool[key];
+            if (!audio) return;
+            if (isLocalBlinded() && key !== 'blindStatus') return;
+            const now = Date.now();
+            const lastAt = sfxLastPlayAt[key] || 0;
+            if (cooldownMs > 0 && now - lastAt < cooldownMs) return;
+            sfxLastPlayAt[key] = now;
+            audio.volume = Math.max(0, Math.min(1, volume));
+            audio.currentTime = 0;
+            audio.play().catch(() => {});
+        }
+
+        function playSfxFixedWindow(key, { volume = 0.8, cooldownMs = 0, durationMs = 1000 } = {}) {
+            const audio = sfxPool[key];
+            if (!audio) return;
+            if (isLocalBlinded() && key !== 'blindStatus') return;
+            const now = Date.now();
+            const lastAt = sfxLastPlayAt[key] || 0;
+            if (cooldownMs > 0 && now - lastAt < cooldownMs) return;
+            sfxLastPlayAt[key] = now;
+            audio.volume = Math.max(0, Math.min(1, volume));
+            audio.currentTime = 0;
+            audio.play().catch(() => {});
+            if (sfxStopTimers[key]) {
+                clearTimeout(sfxStopTimers[key]);
+                sfxStopTimers[key] = null;
+            }
+            sfxStopTimers[key] = setTimeout(() => {
+                audio.pause();
+                audio.currentTime = 0;
+                sfxStopTimers[key] = null;
+            }, Math.max(50, durationMs));
+        }
+
+        function isLocalBlinded() {
+            const me = players && players[myRole];
+            return !!(me && me.alive && me.blindEndTime && Date.now() < me.blindEndTime);
+        }
+
+        function startLowHpLoop() {
+            const audio = sfxPool.lowHp;
+            if (!audio || lowHpLooping || isLocalBlinded()) return;
+            lowHpLooping = true;
+            audio.volume = 0.1;
+            audio.currentTime = 0;
+            audio.play().catch(() => {
+                lowHpLooping = false;
+            });
+        }
+
+        function stopLowHpLoop() {
+            const audio = sfxPool.lowHp;
+            if (!audio) return;
+            lowHpLooping = false;
+            audio.pause();
+            audio.currentTime = 0;
+        }
+
+        function updateLocalLowHpLoop() {
+            const me = players[myRole];
+            if (!me || !me.alive || me.hp <= 0) {
+                stopLowHpLoop();
+                return;
+            }
+            if (isLocalBlinded()) {
+                stopLowHpLoop();
+                return;
+            }
+            if (me.hp <= 25) {
+                startLowHpLoop();
+            } else {
+                stopLowHpLoop();
+            }
+        }
+
+        function startBlindStatusLoop() {
+            const audio = sfxPool.blindStatus;
+            if (!audio || blindStatusLooping) return;
+            blindStatusLooping = true;
+            audio.volume = 0.9;
+            audio.currentTime = 0;
+            audio.play().catch(() => {
+                blindStatusLooping = false;
+            });
+        }
+
+        function stopBlindStatusLoop() {
+            const audio = sfxPool.blindStatus;
+            if (!audio) return;
+            blindStatusLooping = false;
+            audio.pause();
+            audio.currentTime = 0;
+        }
+
+        function updateBlindAudioLoop() {
+            if (isLocalBlinded()) {
+                stopLowHpLoop();
+                startBlindStatusLoop();
+            } else {
+                stopBlindStatusLoop();
+            }
+        }
+
+        function playPositionalSfx(key, sourcePos, { minDist = 4, maxDist = 55, baseVolume = 1, cooldownMs = 120 } = {}) {
+            const me = players[myRole];
+            if (!me || !me.mesh || !sourcePos) return;
+            const dx = me.mesh.position.x - sourcePos.x;
+            const dz = me.mesh.position.z - sourcePos.z;
+            const dist = Math.hypot(dx, dz);
+            if (dist > maxDist) return;
+            let factor = 1;
+            if (dist > minDist) {
+                factor = 1 - (dist - minDist) / Math.max(1, maxDist - minDist);
+            }
+            const volume = Math.max(0, Math.min(1, baseVolume * factor));
+            if (volume <= 0.01) return;
+            playSfx(key, { volume, cooldownMs });
+        }
+
+        initAudioPool();
+        window.addEventListener('pointerdown', unlockAudioOnce, { once: true });
+        window.addEventListener('keydown', unlockAudioOnce, { once: true });
+        window.addEventListener('touchstart', unlockAudioOnce, { once: true });
+
+        function getBlindVisionRadiusWorld() {
+            if (!WEAPONS.blindgun) return 24;
+            const raw = Number(WEAPONS.blindgun.blindVisionRadius);
+            return Number.isFinite(raw) ? Math.min(120, Math.max(6, raw)) : 24;
+        }
+
+        function restoreBlindWorldState() {
+            scene.background = SKY_BG_COLOR;
+            floor.visible = true;
+            grid.visible = true;
+            blindGround.visible = false;
+            for (const o of obstacles) o.visible = true;
+            for (const p of ponds) p.visible = true;
+            for (const b of buildings) b.visible = true;
+            for (const g of grassPatches) {
+                if (g && g.mesh) g.mesh.visible = true;
+            }
+            for (const pack of healthPacks) {
+                if (pack && pack.mesh) pack.mesh.visible = true;
+            }
+            for (const m of mines) {
+                if (m && m.mesh) m.mesh.visible = true;
+            }
+            for (const b of bullets) {
+                if (b && b.mesh) b.mesh.visible = true;
+            }
+            if (poisonCircle) poisonCircle.visible = true;
+            if (satellitePickup && satellitePickup.mesh) satellitePickup.mesh.visible = true;
+        }
+
+        function updateBlindWorldVisibility(nowMs) {
+            const me = players[myRole];
+            const blinded = !!(me && me.alive && me.blindEndTime && nowMs < me.blindEndTime);
+            if (!blinded || !me || !me.mesh) {
+                if (blindWorldApplied) {
+                    restoreBlindWorldState();
+                    blindWorldApplied = false;
+                }
+                return;
+            }
+            blindWorldApplied = true;
+
+            const radius = getBlindVisionRadiusWorld();
+            const radiusSq = radius * radius;
+            const mx = me.mesh.position.x;
+            const mz = me.mesh.position.z;
+            const near = (pos) => {
+                if (!pos) return false;
+                const dx = pos.x - mx;
+                const dz = pos.z - mz;
+                return (dx * dx + dz * dz) <= radiusSq;
+            };
+
+            scene.background = BLIND_BG_COLOR;
+            floor.visible = false;
+            grid.visible = false;
+            blindGround.visible = true;
+            blindGround.position.set(mx, 0.03, mz);
+            blindGround.scale.set(radius, radius, 1);
+
+            let nearStaticCount = 0;
+            for (const o of obstacles) {
+                const v = near(o.position);
+                o.visible = v;
+                if (v) nearStaticCount += 1;
+            }
+            for (const p of ponds) {
+                const v = near(p.position);
+                p.visible = v;
+                if (v) nearStaticCount += 1;
+            }
+            for (const b of buildings) {
+                const v = near(b.position);
+                b.visible = v;
+                if (v) nearStaticCount += 1;
+            }
+            for (const g of grassPatches) {
+                if (!g || !g.mesh) continue;
+                g.mesh.visible = near(g.mesh.position);
+            }
+            for (const pack of healthPacks) {
+                if (!pack || !pack.mesh) continue;
+                pack.mesh.visible = near(pack.mesh.position);
+            }
+            for (const m of mines) {
+                if (!m || !m.mesh) continue;
+                m.mesh.visible = near(m.mesh.position);
+            }
+            for (const b of bullets) {
+                if (!b || !b.mesh) continue;
+                b.mesh.visible = near(b.mesh.position);
+            }
+            for (const role of PLAYER_KEYS) {
+                const p = players[role];
+                if (!p || !p.mesh) continue;
+                if (role === myRole) {
+                    p.mesh.visible = true;
+                    continue;
+                }
+                const baseVisible = !p.inGrass && p.alive && p.hp > 0;
+                p.mesh.visible = baseVisible && near(p.mesh.position);
+            }
+            if (poisonCircle) poisonCircle.visible = false;
+            if (satellitePickup && satellitePickup.mesh) satellitePickup.mesh.visible = near(satellitePickup.mesh.position);
+
+        }
 
         const hpFillEls = {
             p1: document.getElementById('p1-hp'),
@@ -158,6 +450,7 @@ import {
         const bullets = [];
         const mines = [];
         const explosions = [];
+        const damagePopups = [];
         let bulletSeq = 1;
         const SCORE_STORAGE_KEY = 'battle_tank_score_state_v1';
         function loadScoreState() {
@@ -204,6 +497,16 @@ import {
         let localReady = false;
         let remoteReady = false;
         let currentConfig = null;
+        let blindWorldApplied = false;
+        let enemyPosHandler = null;
+        let enemyFireHandler = null;
+        let enemyWeaponSwitchHandler = null;
+        let scopeStateHandler = null;
+        let enemyHpHandler = null;
+        let hitSyncHandler = null;
+        let satelliteFireHandler = null;
+        let satelliteStrikeStartHandler = null;
+        let satellitePickupHandler = null;
 
         const cam1 = new THREE.PerspectiveCamera(60, (window.innerWidth / 2) / window.innerHeight, 0.1, 500);
         const cam2 = new THREE.PerspectiveCamera(60, (window.innerWidth / 2) / window.innerHeight, 0.1, 500);
@@ -223,6 +526,7 @@ import {
         function isHostRole() {
             return myRole === 'p1';
         }
+
 
         function createPlayerState(color) {
             return {
@@ -251,8 +555,12 @@ import {
                 lastShot: 0,
                 lastMineTime: 0,
                 lastCollisionDmgTime: 0,
+                mgBurstStartAt: 0,
+                mgLastShotAt: 0,
+                mgOverheatUntil: 0,
                 stunEndTime: 0,
                 poisonEndTime: 0,
+                blindEndTime: 0,
                 inGrass: false,
                 scoping: false,
                 usingSatellite: false,
@@ -426,6 +734,15 @@ import {
 
         const grid = new THREE.GridHelper(floorSize, 40, 0x446644, 0x446644);
         scene.add(grid);
+        const blindGround = new THREE.Mesh(
+            new THREE.CircleGeometry(1, 64),
+            new THREE.MeshStandardMaterial({ color: 0x5e8c4f })
+        );
+        blindGround.rotation.x = -Math.PI / 2;
+        blindGround.position.y = 0.03;
+        blindGround.receiveShadow = true;
+        blindGround.visible = false;
+        scene.add(blindGround);
 
         const ambient = new THREE.AmbientLight(0xffffff, 0.85);
         ambient.layers.enableAll();
@@ -838,6 +1155,7 @@ import {
             hpFillEls[playerKey].style.width = `${Math.max(0, player.hp)}%`;
             hpTextEls[playerKey].textContent = `HP ${Math.ceil(player.hp)}`;
             weaponTextEls[playerKey].textContent = `武器：${WEAPONS[player.weapon].name}`;
+            if (playerKey === myRole) updateLocalLowHpLoop();
         }
 
         function updateAllHud() {
@@ -848,10 +1166,66 @@ import {
             }
         }
 
+        function spawnDamagePopup(playerKey, dmg) {
+            const player = players[playerKey];
+            if (!player || !player.mesh || !Number.isFinite(dmg) || dmg <= 0) return;
+            // 低于 1 的持续性小数伤害（如毒伤逐帧）不弹字，避免刷屏
+            if (dmg < 1) return;
+            const angle = Math.random() * Math.PI * 2;
+            const radius = 0.9 + Math.random() * 1.3;
+            damagePopups.push({
+                role: playerKey,
+                text: `-${Math.max(1, Math.round(dmg))}`,
+                start: performance.now(),
+                lifeMs: 850,
+                offsetX: Math.cos(angle) * radius,
+                offsetZ: Math.sin(angle) * radius,
+                offsetY: 1.1 + Math.random() * 0.7
+            });
+        }
+
+        function updateDamagePopups(now, cam) {
+            if (!cam || !scopeCtx || damagePopups.length === 0) return;
+            for (let i = damagePopups.length - 1; i >= 0; i--) {
+                const p = damagePopups[i];
+                const player = players[p.role];
+                const t = (now - p.start) / p.lifeMs;
+                if (!player || !player.mesh || t >= 1) {
+                    damagePopups.splice(i, 1);
+                    continue;
+                }
+
+                const worldPos = new THREE.Vector3(
+                    player.mesh.position.x + p.offsetX,
+                    player.mesh.position.y + p.offsetY + t * 1.8,
+                    player.mesh.position.z + p.offsetZ
+                );
+                const ndc = worldPos.project(cam);
+                if (ndc.z < -1 || ndc.z > 1) continue;
+                if (ndc.x < -1.1 || ndc.x > 1.1 || ndc.y < -1.1 || ndc.y > 1.1) continue;
+
+                const sx = ((ndc.x + 1) * 0.5) * scopeCanvas.width;
+                const sy = ((1 - ndc.y) * 0.5) * scopeCanvas.height;
+                const alpha = 1 - t;
+
+                scopeCtx.save();
+                scopeCtx.globalAlpha = alpha;
+                scopeCtx.font = 'bold 28px Microsoft YaHei';
+                scopeCtx.textAlign = 'center';
+                scopeCtx.textBaseline = 'middle';
+                scopeCtx.lineWidth = 4;
+                scopeCtx.strokeStyle = 'rgba(20,20,20,0.9)';
+                scopeCtx.strokeText(p.text, sx, sy);
+                scopeCtx.fillStyle = 'rgba(255,80,80,1)';
+                scopeCtx.fillText(p.text, sx, sy);
+                scopeCtx.restore();
+            }
+        }
+
         function toggleWeapon(playerKey) {
             const player = players[playerKey];
             if (!player.alive || player.hp <= 0) return;
-            // mg -> cannon -> shotgun -> emgun -> toxic -> mg 循环切换
+            // mg -> cannon -> shotgun -> emgun -> toxic -> blindgun -> mg 循环切换
             if (player.weapon === 'mg') {
                 player.weapon = 'cannon';
             } else if (player.weapon === 'cannon') {
@@ -860,6 +1234,8 @@ import {
                 player.weapon = 'emgun';
             } else if (player.weapon === 'emgun') {
                 player.weapon = 'toxic';
+            } else if (player.weapon === 'toxic') {
+                player.weapon = 'blindgun';
             } else {
                 player.weapon = 'mg';
             }
@@ -868,6 +1244,7 @@ import {
 
         function applyDamage(playerKey, dmg) {
             const player = players[playerKey];
+            spawnDamagePopup(playerKey, dmg);
 
             // 只有本机所属角色才真正修改血量并向网络同步；
             // 对于非本机角色，只做受击特效，数值完全由对方通过 enemy_hp 同步过来。
@@ -922,7 +1299,29 @@ import {
             }
             const cfg = WEAPONS[player.weapon];
             const now = Date.now();
-            if (now - player.lastShot < cfg.cd) return;
+
+            // 机枪过热：持续开火 1 秒后强制冷却 0.5 秒
+            if (player.weapon === 'mg') {
+                const MG_BURST_MS = 600;
+                const MG_OVERHEAT_MS = 300;
+                const MG_GAP_RESET_MS = 180;
+                if (player.mgOverheatUntil && now < player.mgOverheatUntil) return;
+                if (!player.mgBurstStartAt || (player.mgLastShotAt && now - player.mgLastShotAt > MG_GAP_RESET_MS)) {
+                    player.mgBurstStartAt = now;
+                }
+                if (now - player.mgBurstStartAt >= MG_BURST_MS) {
+                    player.mgOverheatUntil = now + MG_OVERHEAT_MS;
+                    player.mgBurstStartAt = 0;
+                    return;
+                }
+            }
+
+            if (now - player.lastShot < cfg.cd) {
+                if (playerKey === myRole && player.weapon === 'cannon'&&now - player.lastShot >= 500) {
+                    playSfx('cannonCooldown', { volume: 0.85, cooldownMs: 250 });
+                }
+                return;
+            }
 
             const muzzlePos = new THREE.Vector3();
             player.muzzle.getWorldPosition(muzzlePos);
@@ -972,7 +1371,11 @@ import {
                     ? allowSpreadOverride
                     : (bulletSpreadEnabled && !player.scoping);
                 if (canSpread) {
-                    const maxSpread = player.weapon === 'cannon' || player.weapon === 'toxic' ? CANNON_SPREAD_ANGLE : player.weapon === 'emgun' ? 0 : MG_SPREAD_ANGLE;
+                    const maxSpread = player.weapon === 'cannon' || player.weapon === 'toxic'
+                        ? CANNON_SPREAD_ANGLE
+                        : (player.weapon === 'emgun' || player.weapon === 'blindgun')
+                            ? 0
+                            : MG_SPREAD_ANGLE;
                     const spreadAngle = (Math.random() - 0.5) * 2 * maxSpread;
                     dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), spreadAngle);
                 }
@@ -980,6 +1383,25 @@ import {
             }
 
             player.lastShot = now;
+            if (player.weapon === 'mg') {
+                player.mgLastShotAt = now;
+            }
+            if (playerKey === myRole) {
+                if (player.weapon === 'mg') {
+                    // 机枪音效：按住开火键时触发
+                    playSfxFixedWindow('mgFire', { volume: 0.8, cooldownMs: 800, durationMs: 1000 });
+                } else if (player.weapon === 'shotgun') {
+                    playSfx('shotgunFire', { volume: 0.9, cooldownMs: 80 });
+                } else if (player.weapon === 'cannon') {
+                    playSfx('sniperFire', { volume: 0.95, cooldownMs: 40 });
+                } else if (player.weapon === 'emgun') {
+                    playSfx('freezeFire', { volume: 0.85, cooldownMs: 40 });
+                } else if (player.weapon === 'toxic') {
+                    playSfx('toxicFire', { volume: 0.85, cooldownMs: 40 });
+                } else if (player.weapon === 'blindgun') {
+                    playSfx('blindFire', { volume: 0.85, cooldownMs: 40 });
+                }
+            }
         }
 
         function disposeBullet(bullet) {
@@ -1002,6 +1424,21 @@ import {
             }
             // 子弹可以穿过池塘；建筑物由 obstacles 列表统一阻挡即可
             return false;
+        }
+
+        // 计算二维点到线段最短距离，用于防止高速子弹“隧穿”目标
+        function pointToSegmentDistance2D(px, pz, ax, az, bx, bz) {
+            const abx = bx - ax;
+            const abz = bz - az;
+            const apx = px - ax;
+            const apz = pz - az;
+            const abLen2 = abx * abx + abz * abz;
+            if (abLen2 <= 1e-9) return Math.hypot(apx, apz);
+            let t = (apx * abx + apz * abz) / abLen2;
+            t = Math.max(0, Math.min(1, t));
+            const qx = ax + abx * t;
+            const qz = az + abz * t;
+            return Math.hypot(px - qx, pz - qz);
         }
 
         function detectDoubleTap(playerKey, code, now) {
@@ -1084,9 +1521,7 @@ import {
                     // 将瞄准镜开关状态同步给其他玩家，保证数值和状态一致
                     socket.emit('scope_state', { role: playerKey, scoping: player.scoping });
                 }
-                if (event.code === bindings.fire && player.usingSatellite && !player.satelliteFiring) {
-                    fireSatelliteLaser(playerKey);
-                }
+                if (event.code === bindings.fire && player.usingSatellite && !player.satelliteFiring) fireSatelliteLaser(playerKey);
             }
 
             // 三个角色的按键都可以触发各自的双击加速
@@ -1215,6 +1650,14 @@ import {
             impact.position.y = 0.18;
             group.add(impact);
 
+            const warnDisk = new THREE.Mesh(
+                new THREE.CircleGeometry(SATELLITE_RADIUS * 0.95, 48),
+                new THREE.MeshBasicMaterial({ color: 0xff3b2f, transparent: true, opacity: 0.28, side: THREE.DoubleSide })
+            );
+            warnDisk.rotation.x = -Math.PI / 2;
+            warnDisk.position.y = 0.12;
+            group.add(warnDisk);
+
             group.position.set(target.x, 0, target.z);
             scene.add(group);
             return group;
@@ -1234,13 +1677,50 @@ import {
 
             group.position.copy(position);
             scene.add(group);
-            explosions.push({ mesh: group, start: performance.now() });
+            explosions.push({ mesh: group, start: performance.now(), type: 'normal' });
+        }
+
+        function createSatelliteExplosionAt(position) {
+            const group = new THREE.Group();
+            const core = new THREE.Mesh(
+                new THREE.SphereGeometry(2.8, 18, 18),
+                new THREE.MeshBasicMaterial({ color: 0xfff4b2 })
+            );
+            group.add(core);
+
+            const shockwave = new THREE.Mesh(
+                new THREE.RingGeometry(1.4, SATELLITE_RADIUS * 1.35, 56),
+                new THREE.MeshBasicMaterial({ color: 0xff6b2d, transparent: true, opacity: 0.88, side: THREE.DoubleSide })
+            );
+            shockwave.rotation.x = -Math.PI / 2;
+            shockwave.position.y = 0.2;
+            group.add(shockwave);
+
+            const outerWave = new THREE.Mesh(
+                new THREE.RingGeometry(SATELLITE_RADIUS * 0.9, SATELLITE_RADIUS * 1.8, 64),
+                new THREE.MeshBasicMaterial({ color: 0xffd45a, transparent: true, opacity: 0.62, side: THREE.DoubleSide })
+            );
+            outerWave.rotation.x = -Math.PI / 2;
+            outerWave.position.y = 0.24;
+            group.add(outerWave);
+
+            const flash = new THREE.Mesh(
+                new THREE.CylinderGeometry(3.2, 3.2, 55, 18),
+                new THREE.MeshBasicMaterial({ color: 0xffb347, transparent: true, opacity: 0.5 })
+            );
+            flash.position.y = 27;
+            group.add(flash);
+
+            group.position.copy(position);
+            scene.add(group);
+            explosions.push({ mesh: group, start: performance.now(), type: 'satellite' });
         }
 
         function updateExplosions(now) {
             for (let i = explosions.length - 1; i >= 0; i--) {
                 const exp = explosions[i];
-                const t = (now - exp.start) / 600;
+                const lifeMs = exp.type === 'satellite' ? 1100 : 600;
+                const t = (now - exp.start) / lifeMs;
                 if (t >= 1) {
                     scene.remove(exp.mesh);
                     exp.mesh.traverse(obj => {
@@ -1250,12 +1730,12 @@ import {
                     explosions.splice(i, 1);
                     continue;
                 }
-                const scale = 1 + t * 3;
+                const scale = exp.type === 'satellite' ? (1 + t * 6.8) : (1 + t * 3);
                 exp.mesh.scale.set(scale, scale, scale);
-                exp.mesh.position.y = 0.5 + t * 1.5;
+                exp.mesh.position.y = exp.type === 'satellite' ? (0.3 + t * 2.2) : (0.5 + t * 1.5);
                 exp.mesh.traverse(obj => {
                     if (obj.material && obj.material.transparent) {
-                        obj.material.opacity = 0.9 * (1 - t);
+                        obj.material.opacity = (exp.type === 'satellite' ? 0.95 : 0.9) * (1 - t);
                     }
                 });
             }
@@ -1277,16 +1757,64 @@ import {
             player.satelliteFireTime = Date.now();
             player.satelliteDamageApplied = false;
             player.satelliteBeam = createSatelliteBeam(player.satelliteTarget);
+            socket.emit('satellite_strike_start', {
+                shooterRole: playerKey,
+                targetX: player.satelliteTarget.x,
+                targetZ: player.satelliteTarget.z,
+                startAt: player.satelliteFireTime
+            });
+        }
 
-            for (const targetKey of PLAYER_KEYS) {
-                const target = players[targetKey];
-                const dx = target.mesh.position.x - player.satelliteTarget.x;
-                const dz = target.mesh.position.z - player.satelliteTarget.z;
-                if (Math.hypot(dx, dz) <= SATELLITE_RADIUS) {
-                    applyDamage(targetKey, SATELLITE_DAMAGE);
+        function startSatelliteStrikeVisual(shooterRole, targetX, targetZ, startAt) {
+            const shooter = players[shooterRole];
+            if (!shooter) return;
+            if (shooter.satelliteBeam) {
+                disposeSatelliteBeam(shooter.satelliteBeam);
+                shooter.satelliteBeam = null;
+            }
+            shooter.satelliteTarget.x = targetX;
+            shooter.satelliteTarget.z = targetZ;
+            shooter.satelliteFiring = true;
+            // 不依赖远端时间戳，避免不同机器时钟偏差导致预警/爆炸严重延后
+            shooter.satelliteFireTime = Date.now();
+            shooter.satelliteDamageApplied = false;
+            shooter.satelliteBeam = createSatelliteBeam(shooter.satelliteTarget);
+        }
+
+        function triggerSatelliteImpact(playerKey) {
+            const player = players[playerKey];
+            if (!player || player.satelliteDamageApplied) return;
+            const targetX = player.satelliteTarget.x;
+            const targetZ = player.satelliteTarget.z;
+
+            if (isHostRole()) {
+                for (const targetKey of PLAYER_KEYS) {
+                    const target = players[targetKey];
+                    if (!target || !target.mesh || !target.alive || target.hp <= 0) continue;
+                    const dx = target.mesh.position.x - targetX;
+                    const dz = target.mesh.position.z - targetZ;
+                    if (Math.hypot(dx, dz) <= SATELLITE_RADIUS) {
+                        socket.emit('hit_report', {
+                            targetRole: targetKey,
+                            dmg: SATELLITE_DAMAGE,
+                            weapon: 'satellite',
+                            shooterRole: playerKey
+                        });
+                    }
                 }
+            } else if (playerKey === myRole) {
+                socket.emit('satellite_fire', {
+                    shooterRole: playerKey,
+                    targetX,
+                    targetZ,
+                    dmg: SATELLITE_DAMAGE
+                });
             }
 
+            createSatelliteExplosionAt(new THREE.Vector3(targetX, 0.2, targetZ));
+            if (playerKey === myRole) {
+                playSfx('satelliteExplosion', { volume: 0.95, cooldownMs: 250 });
+            }
             player.satelliteDamageApplied = true;
         }
 
@@ -1444,6 +1972,7 @@ import {
                         if (isLocalRole(playerKey)) {
                             player.regenRemaining = HEALTH_PACK_REGEN_TOTAL;
                             player.regenPerSecond = HEALTH_PACK_REGEN_RATE;
+                            playSfx('pickupHealth', { volume: 0.85, cooldownMs: 120 });
                         }
                         pack.active = false;
                         pack.mesh.visible = false;
@@ -1486,11 +2015,15 @@ import {
                 satellitePickup.mesh.rotation.y += 0.025;
                 satellitePickup.mesh.position.y = 2.6 + Math.sin(now * 0.0035) * 0.45;
 
-                for (const playerKey of PLAYER_KEYS) {
-                    const player = players[playerKey];
+                const playerKey = myRole;
+                const player = players[playerKey];
+                if (!player || !player.mesh || !player.alive || player.hp <= 0) {
+                    // 本机玩家不可拾取时跳过本帧检测
+                } else {
                     const dx = player.mesh.position.x - satellitePickup.mesh.position.x;
                     const dz = player.mesh.position.z - satellitePickup.mesh.position.z;
-                    if (Math.hypot(dx, dz) < 3) {
+                    const localDist = Math.hypot(dx, dz);
+                    if (localDist < 3) {
                         satellitePickup.active = false;
                         satellitePickup.mesh.visible = false;
                         satellitePickup.respawnTime = now + SATELLITE_RESPAWN;
@@ -1500,7 +2033,8 @@ import {
                         player.satelliteTarget.x = 0;
                         player.satelliteTarget.z = 0;
                         player.scoping = false;
-                        break;
+                        socket.emit('satellite_pickup', { role: playerKey, at: now });
+                        playSfx('pickupSatellite', { volume: 0.9, cooldownMs: 180 });
                     }
                 }
             } else if (now > satellitePickup.respawnTime) {
@@ -1511,8 +2045,8 @@ import {
         function updateSatellitePlayers(now, deltaSeconds) {
             for (const playerKey of PLAYER_KEYS) {
                 const player = players[playerKey];
-                if (!player.alive || player.hp <= 0) continue;
-                if (player.usingSatellite && !player.satelliteFiring) {
+                const canControlSatellite = !!(player.alive && player.hp > 0);
+                if (playerKey === myRole && canControlSatellite && player.usingSatellite && !player.satelliteFiring) {
                     const bindings = keyBindings[playerKey];
                     const targetSpeed = SATELLITE_TARGET_SPEED * deltaSeconds;
                     if (keys[bindings.forward]) player.satelliteTarget.z -= targetSpeed;
@@ -1521,6 +2055,24 @@ import {
                     if (keys[bindings.right]) player.satelliteTarget.x += targetSpeed;
                     player.satelliteTarget.x = clampToMap(player.satelliteTarget.x);
                     player.satelliteTarget.z = clampToMap(player.satelliteTarget.z);
+                }
+
+                if (player.satelliteFiring && player.satelliteBeam) {
+                    const elapsed = now - player.satelliteFireTime;
+                    const remain = Math.max(0, SATELLITE_WARNING_MS - elapsed);
+                    const beam = player.satelliteBeam.children[0];
+                    const core = player.satelliteBeam.children[1];
+                    const ring = player.satelliteBeam.children[2];
+                    const warnDisk = player.satelliteBeam.children[3];
+                    const pulse = 0.5 + 0.5 * Math.sin(now * 0.035);
+                    if (beam && beam.material) beam.material.opacity = 0.35 + pulse * 0.25;
+                    if (core && core.material) core.material.opacity = 0.58 + pulse * 0.35;
+                    if (ring && ring.material) ring.material.opacity = 0.45 + pulse * 0.5;
+                    if (warnDisk && warnDisk.material) warnDisk.material.opacity = 0.2 + pulse * 0.45;
+
+                    if (!player.satelliteDamageApplied && remain <= 0) {
+                        triggerSatelliteImpact(playerKey);
+                    }
                 }
 
                 if (player.satelliteFiring && now - player.satelliteFireTime >= SATELLITE_EFFECT_MS) {
@@ -1561,6 +2113,8 @@ import {
         function updateBullets(deltaSeconds) {
             for (let i = bullets.length - 1; i >= 0; i--) {
                 const bullet = bullets[i];
+                const prevX = bullet.mesh.position.x;
+                const prevZ = bullet.mesh.position.z;
                 bullet.mesh.position.addScaledVector(bullet.dir, bullet.speed * deltaSeconds);
                 if (checkBulletObstacleCollision(bullet, i)) continue;
 
@@ -1571,9 +2125,15 @@ import {
                         if (key === bullet.owner) continue;
                         const target = players[key];
                         if (!target.mesh || !target.alive || target.hp <= 0) continue;
-                        const dx = bullet.mesh.position.x - target.mesh.position.x;
-                        const dz = bullet.mesh.position.z - target.mesh.position.z;
-                        if (Math.hypot(dx, dz) < 2.2) {
+                        const sweepDist = pointToSegmentDistance2D(
+                            target.mesh.position.x,
+                            target.mesh.position.z,
+                            prevX,
+                            prevZ,
+                            bullet.mesh.position.x,
+                            bullet.mesh.position.z
+                        );
+                        if (sweepDist < (2.2 + (bullet.radius || 0))) {
                             let dmg = bullet.dmg;
                             // 霰弹枪：根据飞行距离线性衰减伤害，最低保留 50%
                             if (bullet.weapon === 'shotgun' && bullet.origin) {
@@ -1603,6 +2163,9 @@ import {
                                     currentEnd + (cfg.dotDurationPerHit ?? 2000)
                                 );
                             }
+                            if (bullet.weapon === 'blindgun' && WEAPONS.blindgun) {
+                                hitPayload.blindMs = WEAPONS.blindgun.blindDuration ?? 2500;
+                            }
                             socket.emit('hit_report', hitPayload);
                             disposeBullet(bullet);
                             bullets.splice(i, 1);
@@ -1611,7 +2174,40 @@ import {
                         }
                     }
                 }
+                // 非主机只做“视觉命中销毁”，避免看到子弹穿过敌人；真实伤害仍由主机同步
+                if (!isHostRole()) {
+                    for (const key of PLAYER_KEYS) {
+                        if (key === bullet.owner) continue;
+                        const target = players[key];
+                        if (!target.mesh || !target.alive || target.hp <= 0) continue;
+                        const sweepDist = pointToSegmentDistance2D(
+                            target.mesh.position.x,
+                            target.mesh.position.z,
+                            prevX,
+                            prevZ,
+                            bullet.mesh.position.x,
+                            bullet.mesh.position.z
+                        );
+                        if (sweepDist < (2.2 + (bullet.radius || 0))) {
+                            disposeBullet(bullet);
+                            bullets.splice(i, 1);
+                            hit = true;
+                            break;
+                        }
+                    }
+                }
                 if (hit) continue;
+
+                // 子弹近距离掠过本机坦克但未命中时，由“被掠过者”本地播放近失音效
+                const me = players[myRole];
+                if (me && me.mesh && me.alive && bullet.owner !== myRole) {
+                    const mdx = bullet.mesh.position.x - me.mesh.position.x;
+                    const mdz = bullet.mesh.position.z - me.mesh.position.z;
+                    const nearDist = Math.hypot(mdx, mdz);
+                    if (nearDist >= 2.2 && nearDist <= 4.6) {
+                        playSfx('nearMiss', { volume: 0.7, cooldownMs: 220 });
+                    }
+                }
 
                 const outLimit = MAP_HALF * 1.5;
                 if (Math.abs(bullet.mesh.position.x) > outLimit || Math.abs(bullet.mesh.position.z) > outLimit) {
@@ -1710,6 +2306,14 @@ import {
                     }
                 });
             }
+        }
+
+        function updateBlindOverlay(nowMs, cam) {
+            if (!blindOverlayCanvas || !blindOverlayCtx) return;
+            const me = players[myRole];
+            const blinded = !!(me && me.alive && me.blindEndTime && nowMs < me.blindEndTime);
+            blindOverlayCanvas.style.display = 'none';
+            if (!blinded || !cam || !me.mesh) return;
         }
 
         function updateHitFlash() {
@@ -1840,7 +2444,7 @@ import {
         function renderView(cam, player, x, y, w, h) {
             const isSatelliteView = player.usingSatellite || player.satelliteFiring;
             const isScoping = !isSatelliteView && player.scoping;
-            const fov = isScoping ? SCOPE_FOV : NORMAL_FOV;
+            const fov = isSatelliteView ? 70 : (isScoping ? SCOPE_FOV : NORMAL_FOV);
             const shake = new THREE.Vector3((Math.random() - 0.5) * player.shake, (Math.random() - 0.5) * player.shake, 0);
             const yaw = (player.alive && player.hp > 0) ? player.mesh.rotation.y : player.viewYaw;
             const hullYaw = (player.alive && player.hp > 0) ? player.mesh.rotation.y : player.viewYaw;
@@ -1850,7 +2454,13 @@ import {
             const scopeYawQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), totalYaw);
             const hullYawQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), hullYaw);
 
-            if (isScoping) {
+            if (isSatelliteView) {
+                // 卫星模式：真正切到俯视地图视角，以卫星目标点为中心
+                const targetX = player.satelliteTarget.x;
+                const targetZ = player.satelliteTarget.z;
+                cam.position.set(targetX, 150, targetZ + 0.01);
+                cam.lookAt(targetX, 0, targetZ);
+            } else if (isScoping) {
             const eyePos = player.mesh.position.clone().add(new THREE.Vector3(0, 1.5, 0));
                 cam.position.copy(eyePos).add(shake);
                  // 瞄准镜使用炮台角度 (scopeYawQuat)
@@ -1872,16 +2482,23 @@ import {
             applyStealthForCamera(myRole);
             renderer.render(scene, cam);
             if (isScoping) drawScopeOverlay(x, y, w, h);
-            if (isSatelliteView) drawSatelliteOverlay(player, x, y, w, h);
+            if (isSatelliteView) drawSatelliteOverlay(player, cam, x, y, w, h);
             if (player.shake > 0) player.shake *= 0.9;
         }
 
-        function drawSatelliteOverlay(player, x, y, w, h) {
+        function drawSatelliteOverlay(player, viewCam, x, y, w, h) {
             const canvasH = scopeCanvas.height;
             const cy = canvasH - y - h;
-            const px = x + ((player.satelliteTarget.x + MAP_HALF) / (MAP_HALF * 2)) * w;
-            const py = cy + ((player.satelliteTarget.z + MAP_HALF) / (MAP_HALF * 2)) * h;
-            const radiusPx = (SATELLITE_RADIUS / (MAP_HALF * 2)) * Math.min(w, h);
+            const projected = new THREE.Vector3(player.satelliteTarget.x, 0, player.satelliteTarget.z).project(viewCam);
+            const projPx = x + ((projected.x + 1) * 0.5) * w;
+            const projPy = cy + ((1 - (projected.y + 1) * 0.5)) * h;
+            const projectedEdge = new THREE.Vector3(player.satelliteTarget.x + SATELLITE_RADIUS, 0, player.satelliteTarget.z).project(viewCam);
+            const projEdgePx = x + ((projectedEdge.x + 1) * 0.5) * w;
+            const projRadiusPx = Math.abs(projEdgePx - projPx);
+            // 使用相机投影半径，保证显示圈与真实世界伤害半径一致
+            const radiusPx = projRadiusPx;
+            const px = projPx;
+            const py = projPy;
 
             scopeCtx.save();
             scopeCtx.beginPath();
@@ -1914,7 +2531,13 @@ import {
 
             scopeCtx.fillStyle = 'rgba(255,255,255,0.9)';
             scopeCtx.font = 'bold 18px Microsoft YaHei';
-            scopeCtx.fillText(player.satelliteFiring ? '卫星激光发射中...' : '卫星瞄准：方向键移动，开火键发射', x + 18, cy + 30);
+            if (player.satelliteFiring) {
+                const remainMs = Math.max(0, SATELLITE_WARNING_MS - (Date.now() - player.satelliteFireTime));
+                const remainSec = (remainMs / 1000).toFixed(1);
+                scopeCtx.fillText(`轨道炮锁定中，${remainSec}s 后爆炸`, x + 18, cy + 30);
+            } else {
+                scopeCtx.fillText('卫星瞄准：方向键移动，开火键发射', x + 18, cy + 30);
+            }
             scopeCtx.restore();
         }
 
@@ -2189,6 +2812,10 @@ import {
             minimapCanvas.height = window.innerHeight;
             scopeCanvas.width = window.innerWidth;
             scopeCanvas.height = window.innerHeight;
+            if (blindOverlayCanvas) {
+                blindOverlayCanvas.width = window.innerWidth;
+                blindOverlayCanvas.height = window.innerHeight;
+            }
         }
 
         window.addEventListener('resize', resize);
@@ -2207,70 +2834,142 @@ import {
 
         // 真正开始战斗：只由服务器广播的配置触发
         function startGame(config) {
-            // 敌方坦克位置同步：服务器广播携带角色标识，更新对应坦克
-            socket.on('enemy_pos', (data) => {
-    if (!data || !data.role) return;
-    const role = data.role;
-    if (role === myRole) return;
-    if (players[role] && players[role].mesh) {
-        players[role].mesh.position.set(data.x, 0, data.z);
-        players[role].mesh.rotation.y = data.rot;
-        
-        // 新增：应用接收到的炮台角度
-        if (data.turretRot !== undefined && players[role].turretMesh) {
-            players[role].turretYaw = data.turretRot;
-            players[role].turretMesh.rotation.y = data.turretRot;
-        }
-    }
-            });
+            damagePopups.length = 0;
+            // 战斗事件监听只注册一次，避免多局后叠加导致重复伤害/重复开火
+            if (!enemyPosHandler) {
+                enemyPosHandler = (data) => {
+                    if (!data || !data.role) return;
+                    const role = data.role;
+                    if (role === myRole) return;
+                    if (players[role] && players[role].mesh) {
+                        players[role].mesh.position.set(data.x, 0, data.z);
+                        players[role].mesh.rotation.y = data.rot;
+                        if (data.turretRot !== undefined && players[role].turretMesh) {
+                            players[role].turretYaw = data.turretRot;
+                            players[role].turretMesh.rotation.y = data.turretRot;
+                        }
+                    }
+                };
+                socket.on('enemy_pos', enemyPosHandler);
+            }
 
-            // 敌方开火同步：服务器广播携带发射方角色和散射标记，直接用该角色在本地生成子弹
-            socket.on('enemy_fire', (data) => {
-                if (!data || !data.role) return;
-                const shooterRole = data.role; // 'p1' / 'p2' / 'p3'
-                const canSpread = typeof data.canSpread === 'boolean' ? data.canSpread : null;
-                // 来自网络的开火不再再次上报给服务器，防止互相触发导致无限连射
-                fire(shooterRole, false, canSpread);
-            });
+            if (!enemyFireHandler) {
+                enemyFireHandler = (data) => {
+                    if (!data || !data.role) return;
+                    const shooterRole = data.role;
+                    const canSpread = typeof data.canSpread === 'boolean' ? data.canSpread : null;
+                    fire(shooterRole, false, canSpread);
+                };
+                socket.on('enemy_fire', enemyFireHandler);
+            }
 
-            // 敌方武器切换同步：保证看到的敌方武器类型一致
-            socket.on('enemy_weapon_switch', (data) => {
-                if (!data || !data.role || !data.weapon) return;
-                const role = data.role;
-                if (!players[role]) return;
-                players[role].weapon = data.weapon;
-                updatePlayerHud(role);
-            });
+            if (!enemyWeaponSwitchHandler) {
+                enemyWeaponSwitchHandler = (data) => {
+                    if (!data || !data.role || !data.weapon) return;
+                    const role = data.role;
+                    if (!players[role]) return;
+                    players[role].weapon = data.weapon;
+                    updatePlayerHud(role);
+                };
+                socket.on('enemy_weapon_switch', enemyWeaponSwitchHandler);
+            }
 
-            // 敌方瞄准镜状态同步：保证数值效果一致
-            socket.on('scope_state', (data) => {
-                if (!data || !data.role || typeof data.scoping !== 'boolean') return;
-                const role = data.role;
-                if (!players[role]) return;
-                players[role].scoping = data.scoping;
-            });
+            if (!scopeStateHandler) {
+                scopeStateHandler = (data) => {
+                    if (!data || !data.role || typeof data.scoping !== 'boolean') return;
+                    const role = data.role;
+                    if (!players[role]) return;
+                    players[role].scoping = data.scoping;
+                };
+                socket.on('scope_state', scopeStateHandler);
+            }
 
-            // 敌方血量同步：对方只会同步自己的血量，这里直接更新对应角色的血条
-            socket.on('enemy_hp', (data) => {
-                const role = data.role;
-                if (!players[role]) return;
-                players[role].hp = data.hp;
-                updatePlayerHud(role);
-            });
+            if (!enemyHpHandler) {
+                enemyHpHandler = (data) => {
+                    const role = data.role;
+                    if (!players[role]) return;
+                    players[role].hp = data.hp;
+                    updatePlayerHud(role);
+                };
+                socket.on('enemy_hp', enemyHpHandler);
+            }
 
-            // 受击状态统一同步：由主机上报命中，再由服务器广播给所有客户端执行
-            socket.on('hit_sync', (data) => {
-                if (!data || !data.targetRole || typeof data.dmg !== 'number') return;
-                const role = data.targetRole;
-                if (!players[role]) return;
-                applyDamage(role, data.dmg);
-                if (data.weapon === 'emgun' && typeof data.stunMs === 'number') {
-                    players[role].stunEndTime = Date.now() + data.stunMs;
-                }
-                if (data.weapon === 'toxic' && typeof data.poisonEndAt === 'number') {
-                    players[role].poisonEndTime = data.poisonEndAt;
-                }
-            });
+            if (!hitSyncHandler) {
+                hitSyncHandler = (data) => {
+                    if (!data || !data.targetRole || typeof data.dmg !== 'number') return;
+                    const role = data.targetRole;
+                    if (!players[role]) return;
+                    const target = players[role];
+                    if (target.mesh) {
+                        playPositionalSfx('hit', target.mesh.position, { minDist: 4, maxDist: 52, baseVolume: 0.95, cooldownMs: 400 });
+                    }
+                    applyDamage(role, data.dmg);
+                    if (data.weapon === 'emgun' && typeof data.stunMs === 'number') {
+                        players[role].stunEndTime = Date.now() + data.stunMs;
+                    }
+                    if (data.weapon === 'toxic' && typeof data.poisonEndAt === 'number') {
+                        players[role].poisonEndTime = data.poisonEndAt;
+                    }
+                    if (data.weapon === 'blindgun' && typeof data.blindMs === 'number') {
+                        players[role].blindEndTime = Date.now() + data.blindMs;
+                    }
+                };
+                socket.on('hit_sync', hitSyncHandler);
+            }
+
+            if (!satelliteFireHandler) {
+                satelliteFireHandler = (data) => {
+                    if (!data || myRole !== 'p1') return;
+                    if (!data.shooterRole || typeof data.targetX !== 'number' || typeof data.targetZ !== 'number') return;
+                    for (const targetKey of PLAYER_KEYS) {
+                        const target = players[targetKey];
+                        if (!target || !target.mesh || !target.alive || target.hp <= 0) continue;
+                        const dx = target.mesh.position.x - data.targetX;
+                        const dz = target.mesh.position.z - data.targetZ;
+                        const dist = Math.hypot(dx, dz);
+                        if (dist <= SATELLITE_RADIUS) {
+                            socket.emit('hit_report', {
+                                targetRole: targetKey,
+                                dmg: typeof data.dmg === 'number' ? data.dmg : SATELLITE_DAMAGE,
+                                weapon: 'satellite',
+                                shooterRole: data.shooterRole
+                            });
+                        }
+                    }
+                };
+                socket.on('satellite_fire', satelliteFireHandler);
+            }
+
+            if (!satelliteStrikeStartHandler) {
+                satelliteStrikeStartHandler = (data) => {
+                    if (!data || !data.shooterRole) return;
+                    if (typeof data.targetX !== 'number' || typeof data.targetZ !== 'number') return;
+                    // 本机发射已在本地创建预警，避免重复创建
+                    if (data.shooterRole === myRole) return;
+                    startSatelliteStrikeVisual(data.shooterRole, data.targetX, data.targetZ, data.startAt);
+                };
+                socket.on('satellite_strike_start', satelliteStrikeStartHandler);
+            }
+
+            if (!satellitePickupHandler) {
+                satellitePickupHandler = (data) => {
+                    if (!data || !data.role || !players[data.role]) return;
+                    const eventAt = typeof data.at === 'number' ? data.at : Date.now();
+                    if (satellitePickup && satellitePickup.mesh) {
+                        satellitePickup.active = false;
+                        satellitePickup.mesh.visible = false;
+                        satellitePickup.respawnTime = eventAt + SATELLITE_RESPAWN;
+                    }
+                    const picker = players[data.role];
+                    picker.usingSatellite = true;
+                    picker.satelliteFiring = false;
+                    picker.satelliteDamageApplied = false;
+                    picker.satelliteTarget.x = 0;
+                    picker.satelliteTarget.z = 0;
+                    picker.scoping = false;
+                };
+                socket.on('satellite_pickup', satellitePickupHandler);
+            }
 
             document.getElementById('keybind-modal').classList.remove('open');
 
@@ -2351,6 +3050,7 @@ import {
                     p.alive = false;
                     p.stunEndTime = 0;
                     p.poisonEndTime = 0;
+                    p.blindEndTime = 0;
                     continue;
                 }
                 const tank = createTank(p.color);
@@ -2365,8 +3065,12 @@ import {
                 p.scoping = false;
                 p.lastShot = 0;
                 p.lastMineTime = 0;
+                p.mgBurstStartAt = 0;
+                p.mgLastShotAt = 0;
+                p.mgOverheatUntil = 0;
                 p.stunEndTime = 0;
                 p.poisonEndTime = 0;
+                p.blindEndTime = 0;
                 p.usingSatellite = false;
                 p.satelliteFiring = false;
                 p.satelliteBeam = null;
@@ -2394,6 +3098,7 @@ import {
             }
 
             updateAllHud();
+            stopLowHpLoop();
             updateControlGuide();
             document.getElementById('setup-ui').style.display = 'none';
             document.getElementById('ui').style.display = 'block';
@@ -2491,7 +3196,11 @@ import {
             lastFrameTime = now;
             const tickNow = Date.now();
 
-            if (!gameStarted) return;
+            if (!gameStarted) {
+                updateBlindWorldVisibility(tickNow);
+                updateBlindOverlay(tickNow, null);
+                return;
+            }
 
             // 约每秒发送 30 次“自己”的位置，节省带宽
             if (tickNow - lastNetUpdateTime > 33) {
@@ -2521,12 +3230,16 @@ import {
             updateHitFlash();
             updateStunVisual();
             updatePoisonVisual();
+            updateBlindWorldVisibility(tickNow);
+            updateBlindAudioLoop();
             updateExplosions(now);
             drawMinimaps();
 
             // 联机时只展示本机角色视角，占满全屏
             const activeCamera = myRole === 'p1' ? cam1 : cam2;
             renderView(activeCamera, players[myRole], 0, 0, window.innerWidth, window.innerHeight);
+            updateDamagePopups(now, activeCamera);
+            updateBlindOverlay(tickNow, activeCamera);
 
             Object.keys(keys).forEach(code => {
                 prevKeys[code] = keys[code];
@@ -2625,6 +3338,8 @@ import {
             if (!player || !player.mesh || !player.alive) return;
             player.alive = false;
             player.hp = 0;
+            if (role === myRole) stopLowHpLoop();
+            player.blindEndTime = 0;
             updatePlayerHud(role);
 
             // 将坦克外观替换为黑色方块
@@ -2652,6 +3367,7 @@ import {
 
             // 在死亡位置触发一次爆炸动画
             createExplosionAt(pos);
+            playSfx('deathExplosion', { volume: 0.9, cooldownMs: 120 });
 
             // 检查是否只剩最后一名存活者
             const playingRoles = (activeRoles && activeRoles.length > 0)
@@ -2700,12 +3416,18 @@ import {
 
         // 战斗结束后返回主菜单（计分板由服务端广播 clear_scoreboard 统一清零）
         function goToLobby() {
+            damagePopups.length = 0;
             document.getElementById('winner-msg').style.display = 'none';
             document.getElementById('setup-ui').style.display = 'flex';
             document.getElementById('ui').style.display = 'none';
             document.getElementById('control-guide').style.display = 'none';
             if (minimapCanvas) minimapCanvas.style.display = 'none';
             if (scopeCanvas) scopeCanvas.style.display = 'none';
+            if (blindOverlayCanvas) blindOverlayCanvas.style.display = 'none';
+            restoreBlindWorldState();
+            blindWorldApplied = false;
+            stopBlindStatusLoop();
+            stopLowHpLoop();
             startGameBtn.textContent = '开始游戏';
             startGameBtn.disabled = true;
         }

@@ -572,3 +572,11 @@ button {
     pointer-events: none;
     display: none;
 }
+
+#blind-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 25;
+    pointer-events: none;
+    display: none;
+}
