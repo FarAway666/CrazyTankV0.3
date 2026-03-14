@@ -1214,7 +1214,7 @@ import {
                 scopeCtx.textAlign = 'center';
                 scopeCtx.textBaseline = 'middle';
                 scopeCtx.lineWidth = 4;
-                scopeCtx.strokeStyle = 'rgba(20,20,20,0.9)';
+                scopeCtx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
                 scopeCtx.strokeText(p.text, sx, sy);
                 scopeCtx.fillStyle = 'rgba(255,80,80,1)';
                 scopeCtx.fillText(p.text, sx, sy);
