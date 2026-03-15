@@ -580,3 +580,32 @@ button {
     pointer-events: none;
     display: none;
 }
+
+#weapon-switch-toast {
+    position: fixed;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 100;
+    padding: 16px 36px;
+    background: rgba(0, 0, 0, 0.75);
+    border: 2px solid rgba(0, 242, 255, 0.6);
+    border-radius: 12px;
+    color: #00f2ff;
+    font-size: 28px;
+    font-weight: bold;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+#weapon-switch-toast.show {
+    opacity: 1;
+    animation: weapon-toast-fade 1.8s ease-out forwards;
+}
+
+@keyframes weapon-toast-fade {
+    0% { opacity: 1; }
+    60% { opacity: 1; }
+    100% { opacity: 0; }
+}

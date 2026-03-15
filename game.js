@@ -3,13 +3,14 @@ import {
     MAP_HALF, TANK_RADIUS, MINE_RADIUS, MINE_DAMAGE, MINE_COOLDOWN,
     DOUBLE_TAP_MS, BOOST_DURATION, BOOST_MULTIPLIER,
     STAMINA_MAX, STAMINA_REGEN_PER_SEC, STAMINA_DRAIN_PER_SEC, STAMINA_MIN_TO_START_BOOST,
+    STAMINA_BOOST_MAX_DURATION_MS, STAMINA_BOOST_COOLDOWN_MS,
     COLLISION_DAMAGE, COLLISION_DAMAGE_CD, POISON_DURATION, MAX_RADIUS,
     HEALTH_PACK_REGEN_TOTAL, HEALTH_PACK_REGEN_DURATION, HEALTH_PACK_REGEN_RATE, HEALTH_PACK_RESPAWN,
     MINIMAP_RADIUS,
     MG_SPREAD_ANGLE, CANNON_SPREAD_ANGLE, SHOTGUN_SPREAD_ANGLE,
-    SCOPE_FOV, NORMAL_FOV, SCOPE_SPEED_MULT, SCOPE_TURN_MULT,
+    SCOPE_FOV, NORMAL_FOV, SCOPE_SPEED_MULT, SCOPE_TURN_MULT, MOUSE_TURRET_SENSITIVITY,
     SATELLITE_TARGET_SPEED, SATELLITE_RADIUS, SATELLITE_DAMAGE, SATELLITE_WARNING_MS, SATELLITE_EFFECT_MS, SATELLITE_RESPAWN,
-    PLAYER_KEYS, ACTION_LABELS, DEFAULT_KEYS, WEAPONS
+    PLAYER_KEYS, ACTION_LABELS, DEFAULT_KEYS, WEAPONS, WEAPON_ORDER, SHIELD_RADIUS
 } from './game-const.js';
 
         const socket = typeof io !== 'undefined' ? io() : window.io();
@@ -102,8 +103,10 @@ import {
             if (!WEAPONS.toxic) return;
             const p = players[data.role];
             if (!p) return;
-            // 直接按命中端计算好的结束时间对齐中毒时长
-            p.poisonEndTime = data.poisonEndAt;
+            // 兼容不同设备时钟偏差，避免收到已过期时间导致中毒不掉血
+            const now = Date.now();
+            const minPoisonMs = WEAPONS.toxic.dotDurationPerHit ?? 2000;
+            p.poisonEndTime = Math.max(Number(data.poisonEndAt) || 0, now + minPoisonMs);
         });
 
         let keyBindings = {
@@ -112,6 +115,11 @@ import {
             p3: { ...DEFAULT_KEYS },
             p4: { ...DEFAULT_KEYS }
         };
+
+        // 炮台灵敏度（仅本机生效，0.5~2.0）
+        let localTurretSensitivity = 1.0;
+        // 炮台锁定车身（仅本机生效）
+        let localTurretLocked = false;
 
         const scene = new THREE.Scene();
         const SKY_BG_COLOR = new THREE.Color(0x87CEEB);
@@ -123,7 +131,10 @@ import {
         renderer.setPixelRatio(window.devicePixelRatio || 1);
         renderer.setScissorTest(true);
         renderer.shadowMap.enabled = true;
-        document.body.appendChild(renderer.domElement);
+        const gameCanvas = renderer.domElement;
+        gameCanvas.id = 'game-canvas';
+        gameCanvas.style.cursor = 'pointer';
+        document.body.appendChild(gameCanvas);
 
         const minimapCanvas = document.getElementById('minimap-canvas');
         const minimapCtx = minimapCanvas.getContext('2d');
@@ -339,6 +350,16 @@ import {
             for (const b of bullets) {
                 if (b && b.mesh) b.mesh.visible = true;
             }
+            // 关键修复：致盲结束后恢复各玩家可见性，避免其他坦克偶发保持隐藏
+            for (const role of PLAYER_KEYS) {
+                const p = players[role];
+                if (!p || !p.mesh) continue;
+                if (role === myRole) {
+                    p.mesh.visible = true;
+                    continue;
+                }
+                p.mesh.visible = !p.inGrass && p.alive && p.hp > 0;
+            }
             if (poisonCircle) poisonCircle.visible = true;
             if (satellitePickup && satellitePickup.mesh) satellitePickup.mesh.visible = true;
         }
@@ -447,6 +468,7 @@ import {
 
         const keys = {};
         const prevKeys = {};
+        let mouseButton0 = false;  // 鼠标左键按下状态（用于开火）
         const bullets = [];
         const mines = [];
         const explosions = [];
@@ -498,6 +520,7 @@ import {
         let remoteReady = false;
         let currentConfig = null;
         let blindWorldApplied = false;
+        let spectateTargetRole = null;
         let enemyPosHandler = null;
         let enemyFireHandler = null;
         let enemyWeaponSwitchHandler = null;
@@ -527,6 +550,43 @@ import {
             return myRole === 'p1';
         }
 
+        function getSpectateCandidates() {
+            const roles = (activeRoles && activeRoles.length > 0)
+                ? activeRoles.filter(r => PLAYER_KEYS.includes(r))
+                : PLAYER_KEYS;
+            return roles.filter(role => {
+                if (role === myRole) return false;
+                const p = players[role];
+                return !!(p && p.mesh && p.alive && p.hp > 0);
+            });
+        }
+
+        function ensureSpectateTargetRole() {
+            const candidates = getSpectateCandidates();
+            if (candidates.length === 0) {
+                spectateTargetRole = null;
+                return null;
+            }
+            if (!spectateTargetRole || !candidates.includes(spectateTargetRole)) {
+                spectateTargetRole = candidates[0];
+            }
+            return spectateTargetRole;
+        }
+
+        function cycleSpectateTarget(step) {
+            const candidates = getSpectateCandidates();
+            if (candidates.length === 0) {
+                spectateTargetRole = null;
+                return null;
+            }
+            const current = ensureSpectateTargetRole();
+            let idx = candidates.indexOf(current);
+            if (idx < 0) idx = 0;
+            idx = (idx + step + candidates.length) % candidates.length;
+            spectateTargetRole = candidates[idx];
+            return spectateTargetRole;
+        }
+
 
         function createPlayerState(color) {
             return {
@@ -538,6 +598,7 @@ import {
                 weapon: 'mg',
                 color,
                 turretMesh: null,
+                shieldMesh: null,
                 turretYaw: 0, // 炮台相对车身的旋转角度
                 mesh: null,
                 muzzle: null,
@@ -636,7 +697,7 @@ import {
 
         function renderKeybindUI() {
             const grid = document.getElementById('keybind-grid');
-            const rows = ['forward', 'backward', 'left', 'right', 'fire', 'weaponSwitch', 'scope', 'mine'];
+            const rows = ['forward', 'backward', 'left', 'right', 'turretLeft', 'turretRight', 'turretSensitivityUp', 'turretSensitivityDown', 'turretLock', 'fire', 'weaponSwitch', 'weapon1', 'weapon2', 'weapon3', 'weapon4', 'weapon5', 'weapon6', 'weapon7', 'scope', 'mine'];
             grid.innerHTML = '';
 
             const headAction = document.createElement('div');
@@ -682,9 +743,13 @@ import {
                     <h3 class="p1-color">通用操作说明（所有坦克）</h3>
                     <p>${getReadableKeyName(keyBindings.p1.forward)}/${getReadableKeyName(keyBindings.p1.backward)} - 前进/后退</p>
                     <p>${getReadableKeyName(keyBindings.p1.left)}/${getReadableKeyName(keyBindings.p1.right)} - 左右转向</p>
-                    <p>${getReadableKeyName(keyBindings.p1.fire)} - 开火</p>
-                    <p>${getReadableKeyName(keyBindings.p1.weaponSwitch)} - 切换武器</p>
-                    <p>${getReadableKeyName(keyBindings.p1.scope)} - 开关瞄准镜</p>
+                    <p>${getReadableKeyName(keyBindings.p1.turretLeft)}/${getReadableKeyName(keyBindings.p1.turretRight)} 或 鼠标 - 炮台转向</p>
+                    <p>${getReadableKeyName(keyBindings.p1.turretSensitivityUp)}/${getReadableKeyName(keyBindings.p1.turretSensitivityDown)} - 炮台灵敏度+/-（仅自己）</p>
+                    <p>${getReadableKeyName(keyBindings.p1.turretLock)} - 炮台锁定车身（仅自己）</p>
+                    <p>${getReadableKeyName(keyBindings.p1.fire)} 或 鼠标左键 - 开火</p>
+                    <p>${getReadableKeyName(keyBindings.p1.weaponSwitch)} 或 滚轮 - 循环切换武器</p>
+                    <p>1-7 - 直接切换武器（机枪/狙击/霰弹/冰冻/剧毒/致盲/护盾）</p>
+                    <p>${getReadableKeyName(keyBindings.p1.scope)} 或 鼠标右键 - 开关瞄准镜</p>
                     <p>${getReadableKeyName(keyBindings.p1.mine)} - 放置地雷</p>
                     <p>双击方向键 - 加速移动</p>
                 </div>
@@ -720,7 +785,7 @@ import {
         }
 
         function shouldPreventDefaultForCode(code) {
-            return getAllBoundCodes().includes(code) || code === 'Escape';
+            return getAllBoundCodes().includes(code) || code === 'Escape' || code === 'ArrowLeft' || code === 'ArrowRight';
         }
 
         const floorSize = MAP_HALF * 2;
@@ -783,11 +848,37 @@ import {
             const hatch = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 0.15, 16), darkMat);
             hatch.position.set(0, 1.45, 0.1);
             hatch.castShadow = true;
-            
+
+            // 护盾模型：半透明圆盘，置于炮台前方
+            const shieldColor = WEAPONS.shield ? WEAPONS.shield.color : 0x88ccff;
+            const shieldMat = new THREE.MeshBasicMaterial({
+                color: shieldColor,
+                transparent: true,
+                opacity: 0.6,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            const shieldMesh = new THREE.Mesh(new THREE.CircleGeometry(SHIELD_RADIUS, 32), shieldMat);
+            shieldMesh.rotation.y = Math.PI;  // 水平旋转90度，护盾面向炮台前方（不再立在炮管上）
+            shieldMesh.position.set(0, 1.1, -1.8);
+            shieldMesh.visible = false;
+            turretGroup.add(shieldMesh);
+
             turretGroup.add(turret, gun, hatch);
+
+            // 坦克后方小旗子
+            const flagPole = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.15, 8), darkMat);
+            flagPole.position.set(0.7, 1, 1);
+            flagPole.castShadow = true;
+            const flagMat = new THREE.MeshBasicMaterial({ color: 0xff4444, side: THREE.DoubleSide });
+            const flag = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.25), flagMat);
+            flag.position.set(0, 0.4, 0.21);//（x,z,y)
+            flag.rotation.y = Math.PI / 2;
+            flagPole.add(flag);
+            group.add(flagPole);
             group.add(body, turretGroup);
             scene.add(group);
-            return { group, muzzle, turretGroup};
+            return { group, muzzle, turretGroup, shieldMesh };
         }
 
         // 坦克层分配（保留为空函数，隐身改用透明度方式）
@@ -1150,6 +1241,17 @@ import {
             }
         }
 
+        function showWeaponSwitchToast(weaponName) {
+            const el = document.getElementById('weapon-switch-toast');
+            if (!el) return;
+            el.textContent = weaponName;
+            el.classList.remove('show');
+            el.offsetHeight;
+            el.classList.add('show');
+            clearTimeout(showWeaponSwitchToast._tid);
+            showWeaponSwitchToast._tid = setTimeout(() => el.classList.remove('show'), 1800);
+        }
+
         function updatePlayerHud(playerKey) {
             const player = players[playerKey];
             hpFillEls[playerKey].style.width = `${Math.max(0, player.hp)}%`;
@@ -1222,24 +1324,18 @@ import {
             }
         }
 
-        function toggleWeapon(playerKey) {
+        function toggleWeapon(playerKey, direction = 1) {
             const player = players[playerKey];
             if (!player.alive || player.hp <= 0) return;
-            // mg -> cannon -> shotgun -> emgun -> toxic -> blindgun -> mg 循环切换
-            if (player.weapon === 'mg') {
-                player.weapon = 'cannon';
-            } else if (player.weapon === 'cannon') {
-                player.weapon = 'shotgun';
-            } else if (player.weapon === 'shotgun') {
-                player.weapon = 'emgun';
-            } else if (player.weapon === 'emgun') {
-                player.weapon = 'toxic';
-            } else if (player.weapon === 'toxic') {
-                player.weapon = 'blindgun';
-            } else {
-                player.weapon = 'mg';
-            }
+            const order = WEAPON_ORDER;
+            let idx = order.indexOf(player.weapon);
+            if (idx < 0) idx = 0;
+            const nextIdx = direction > 0
+                ? (idx >= order.length - 1 ? 0 : idx + 1)
+                : (idx <= 0 ? order.length - 1 : idx - 1);
+            player.weapon = order[nextIdx];
             updatePlayerHud(playerKey);
+            if (playerKey === myRole) showWeaponSwitchToast(WEAPONS[player.weapon].name);
         }
 
         function applyDamage(playerKey, dmg) {
@@ -1299,6 +1395,9 @@ import {
             }
             const cfg = WEAPONS[player.weapon];
             const now = Date.now();
+
+            // 护盾为纯防御武器，不发射子弹
+            if (player.weapon === 'shield') return;
 
             // 机枪过热：持续开火 1 秒后强制冷却 0.5 秒
             if (player.weapon === 'mg') {
@@ -1470,10 +1569,10 @@ import {
 
             me.stamina = Math.max(0, Math.min(me.staminaMax, me.stamina + regen - drain));
 
-            // 体力耗尽：立即结束加速并进入 5 秒冷却
+            // 体力耗尽：立即结束加速并进入冷却
             if (me.boosting && me.stamina <= 0) {
                 me.boosting = false;
-                me.boostCooldownUntil = Date.now() + 5000;
+                me.boostCooldownUntil = Date.now() + STAMINA_BOOST_COOLDOWN_MS;
             }
 
             if (staminaFillEl && staminaTextEl) {
@@ -1507,19 +1606,39 @@ import {
 
             const now = Date.now();
             if (gameStarted) {
+                const me = players[myRole];
+                const isDead = !!(me && (!me.alive || me.hp <= 0));
+                if (isDead && (event.code === 'ArrowLeft' || event.code === 'ArrowRight')) {
+                    cycleSpectateTarget(event.code === 'ArrowLeft' ? -1 : 1);
+                }
                 // 只允许“本机角色”根据自己的按键绑定切换武器 / 瞄准镜 / 卫星激光
                 const playerKey = myRole;
                 const player = players[playerKey];
                 const bindings = keyBindings[playerKey];
                 if (event.code === bindings.weaponSwitch && !player.usingSatellite && !player.satelliteFiring) {
                     toggleWeapon(playerKey);
-                    // 同步武器切换到对方
                     socket.emit('weapon_switch', { role: playerKey, weapon: player.weapon });
+                }
+                // 数字键 1-7 直接切换武器
+                for (let i = 1; i <= 7; i++) {
+                    const wkey = 'weapon' + i;
+                    if (bindings[wkey] && event.code === bindings[wkey] && !player.usingSatellite && !player.satelliteFiring) {
+                        const weaponId = WEAPON_ORDER[i - 1];
+                        if (weaponId && player.weapon !== weaponId) {
+                            player.weapon = weaponId;
+                            updatePlayerHud(playerKey);
+                            showWeaponSwitchToast(WEAPONS[player.weapon].name);
+                            socket.emit('weapon_switch', { role: playerKey, weapon: player.weapon });
+                        }
+                        break;
+                    }
                 }
                 if (event.code === bindings.scope && !player.usingSatellite && !player.satelliteFiring) {
                     player.scoping = !player.scoping;
-                    // 将瞄准镜开关状态同步给其他玩家，保证数值和状态一致
                     socket.emit('scope_state', { role: playerKey, scoping: player.scoping });
+                }
+                if (event.code === bindings.turretLock && !prevKeys[bindings.turretLock]) {
+                    localTurretLocked = !localTurretLocked;
                 }
                 if (event.code === bindings.fire && player.usingSatellite && !player.satelliteFiring) fireSatelliteLaser(playerKey);
             }
@@ -1535,6 +1654,95 @@ import {
             keys[event.code] = false;
             prevKeys[event.code] = false;
             if (shouldPreventDefaultForCode(event.code)) event.preventDefault();
+        });
+
+        function enterFullscreenWithPointerLock() {
+            const keybindOpen = document.getElementById('keybind-modal')?.classList.contains('open');
+            const settingsOpen = document.getElementById('settings-modal')?.classList.contains('open');
+            if (keybindOpen || settingsOpen) return;
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen?.()?.catch(() => {});
+            }
+            if (!document.pointerLockElement) {
+                gameCanvas.requestPointerLock?.();
+            }
+        }
+
+        function exitFullscreenAndPointerLock() {
+            if (document.fullscreenElement) {
+                document.exitFullscreen?.();
+            }
+            if (document.pointerLockElement) {
+                document.exitPointerLock?.();
+            }
+        }
+
+        document.addEventListener('pointerlockchange', () => {
+            if (!document.pointerLockElement) {
+                mouseButton0 = false;
+                if (document.fullscreenElement) document.exitFullscreen?.();
+            }
+        });
+        document.addEventListener('fullscreenchange', () => {
+            if (!document.fullscreenElement && document.pointerLockElement) {
+                document.exitPointerLock?.();
+            }
+        });
+
+        gameCanvas.addEventListener('click', () => {
+            if (!gameStarted) return;
+            enterFullscreenWithPointerLock();
+        });
+
+        document.addEventListener('pointerdown', (e) => {
+            if (e.button === 0 && document.pointerLockElement) mouseButton0 = true;
+            if (e.button === 2 && gameStarted && !rebindingTarget) {
+                const keybindOpen = document.getElementById('keybind-modal')?.classList.contains('open');
+                const settingsOpen = document.getElementById('settings-modal')?.classList.contains('open');
+                if (keybindOpen || settingsOpen) return;
+                const player = players[myRole];
+                if (player && player.alive && player.hp > 0 && !player.usingSatellite && !player.satelliteFiring) {
+                    player.scoping = !player.scoping;
+                    socket.emit('scope_state', { role: myRole, scoping: player.scoping });
+                }
+            }
+        });
+        document.addEventListener('pointerup', (e) => {
+            if (e.button === 0) mouseButton0 = false;
+        });
+        document.addEventListener('contextmenu', (e) => {
+            if (gameStarted) e.preventDefault();
+        });
+        document.addEventListener('wheel', (e) => {
+            if (!gameStarted || rebindingTarget) return;
+            const keybindOpen = document.getElementById('keybind-modal')?.classList.contains('open');
+            const settingsOpen = document.getElementById('settings-modal')?.classList.contains('open');
+            if (keybindOpen || settingsOpen) return;
+            const player = players[myRole];
+            if (!player || !player.alive || player.hp <= 0 || player.usingSatellite || player.satelliteFiring) return;
+            if (Math.abs(e.deltaY) < 1) return;
+            e.preventDefault();
+            toggleWeapon(myRole, e.deltaY > 0 ? -1 : 1);
+            socket.emit('weapon_switch', { role: myRole, weapon: player.weapon });
+        }, { passive: false });
+
+        window.addEventListener('mousemove', function handleMouseMove(event) {
+            if (!gameStarted || rebindingTarget) return;
+            const keybindOpen = document.getElementById('keybind-modal')?.classList.contains('open');
+            const settingsOpen = document.getElementById('settings-modal')?.classList.contains('open');
+            if (keybindOpen || settingsOpen) return;
+            const me = players[myRole];
+            if (!me || !me.alive || me.hp <= 0) return;
+            const dx = event.movementX ?? 0;
+            if (Math.abs(dx) > 0) {
+                if (localTurretLocked) {
+                    me.mesh.rotation.y -= dx * MOUSE_TURRET_SENSITIVITY;
+                    me.viewYaw = me.mesh.rotation.y;
+                } else {
+                    me.turretYaw -= dx * MOUSE_TURRET_SENSITIVITY;
+                    if (me.turretMesh) me.turretMesh.rotation.y = me.turretYaw;
+                }
+            }
         });
 
         function createMine(ownerKey, position) {
@@ -2134,6 +2342,22 @@ import {
                             bullet.mesh.position.z
                         );
                         if (sweepDist < (2.2 + (bullet.radius || 0))) {
+                            // 护盾：正面（炮台方向）免疫一切子弹
+                            if (target.weapon === 'shield' && target.turretMesh) {
+                                const toBulletX = bullet.mesh.position.x - target.mesh.position.x;
+                                const toBulletZ = bullet.mesh.position.z - target.mesh.position.z;
+                                const len = Math.hypot(toBulletX, toBulletZ) || 0.0001;
+                                const totalYaw = target.mesh.rotation.y + target.turretYaw;
+                                const forwardX = Math.sin(totalYaw);
+                                const forwardZ = -Math.cos(totalYaw);
+                                const dot = (toBulletX / len) * forwardX + (toBulletZ / len) * forwardZ;
+                                if (dot > 0) {
+                                    disposeBullet(bullet);
+                                    bullets.splice(i, 1);
+                                    hit = true;
+                                    break;
+                                }
+                            }
                             let dmg = bullet.dmg;
                             // 霰弹枪：根据飞行距离线性衰减伤害，最低保留 50%
                             if (bullet.weapon === 'shotgun' && bullet.origin) {
@@ -2162,6 +2386,8 @@ import {
                                     now + (cfg.dotMaxDuration ?? 10000),
                                     currentEnd + (cfg.dotDurationPerHit ?? 2000)
                                 );
+                                // 主机本地先更新一次，避免连续命中在网络回包前丢失叠加
+                                p.poisonEndTime = hitPayload.poisonEndAt;
                             }
                             if (bullet.weapon === 'blindgun' && WEAPONS.blindgun) {
                                 hitPayload.blindMs = WEAPONS.blindgun.blindDuration ?? 2500;
@@ -2189,6 +2415,22 @@ import {
                             bullet.mesh.position.z
                         );
                         if (sweepDist < (2.2 + (bullet.radius || 0))) {
+                            // 护盾正面免疫：非主机也需销毁子弹以保持视觉一致
+                            if (target.weapon === 'shield' && target.turretMesh) {
+                                const toBulletX = bullet.mesh.position.x - target.mesh.position.x;
+                                const toBulletZ = bullet.mesh.position.z - target.mesh.position.z;
+                                const len = Math.hypot(toBulletX, toBulletZ) || 0.0001;
+                                const totalYaw = target.mesh.rotation.y + target.turretYaw;
+                                const forwardX = Math.sin(totalYaw);
+                                const forwardZ = -Math.cos(totalYaw);
+                                const dot = (toBulletX / len) * forwardX + (toBulletZ / len) * forwardZ;
+                                if (dot > 0) {
+                                    disposeBullet(bullet);
+                                    bullets.splice(i, 1);
+                                    hit = true;
+                                    break;
+                                }
+                            }
                             disposeBullet(bullet);
                             bullets.splice(i, 1);
                             hit = true;
@@ -2261,6 +2503,10 @@ import {
             const now = Date.now();
             for (const key of PLAYER_KEYS) {
                 const player = players[key];
+                // 中毒已过期时显式清除，避免主机等情况下状态残留导致“中毒不消失”
+                if (player.poisonEndTime && now >= player.poisonEndTime) {
+                    player.poisonEndTime = 0;
+                }
                 if (!player.alive || player.hp <= 0) continue;
                 if (!(player.poisonEndTime && now < player.poisonEndTime)) continue;
                 if (!isLocalRole(key)) continue;
@@ -2329,6 +2575,15 @@ import {
             }
         }
 
+        function updateShieldVisibility() {
+            for (const key of PLAYER_KEYS) {
+                const player = players[key];
+                if (player.shieldMesh) {
+                    player.shieldMesh.visible = (player.weapon === 'shield');
+                }
+            }
+        }
+
         function updateScoreboardUI() {
             const body = document.getElementById('scoreboard-body');
             if (!body) return;
@@ -2382,10 +2637,10 @@ import {
             const now = Date.now();
             // 双击前进后进入持续加速：按住前进一直加速；松开前进或倒车则取消
             if (player.boosting) {
-                // 满 5 秒进入 5 秒冷却
-                if ((now - (player.boostStartTime || now)) >= 5000) {
+                // 满最大时长进入冷却
+                if ((now - (player.boostStartTime || now)) >= STAMINA_BOOST_MAX_DURATION_MS) {
                     player.boosting = false;
-                    player.boostCooldownUntil = now + 5000;
+                    player.boostCooldownUntil = now + STAMINA_BOOST_COOLDOWN_MS;
                 } else if (!keys[controls.forward] || keys[controls.backward]) {
                     // 主动中断不进入冷却（仅满 5 秒才进入 CD）
                     player.boosting = false;
@@ -2402,7 +2657,16 @@ import {
             // 死亡或眩晕时禁止位移与攻击；眩晕由电磁炮命中造成 0.1 秒无法移动和开火
             const stunned = player.stunEndTime && Date.now() < player.stunEndTime;
             const canMove = player.alive && player.hp > 0 && !stunned;
-            const turretTurnSpeed = 3.5 * deltaSeconds; // 炮台转速
+            const turretTurnSpeed = 3.5 * localTurretSensitivity * deltaSeconds; // 炮台转速
+
+            // 上下键调整炮台灵敏度（仅本机生效）
+            const sensStep = 0.8 * deltaSeconds;
+            if (keys[keyBindings[playerKey].turretSensitivityUp]) {
+                localTurretSensitivity = Math.min(2.0, localTurretSensitivity + sensStep);
+            }
+            if (keys[keyBindings[playerKey].turretSensitivityDown]) {
+                localTurretSensitivity = Math.max(0.5, localTurretSensitivity - sensStep);
+            }
 
             if (canMove) {
                 if (keys[controls.forward]) player.mesh.translateZ(-moveSpeed);
@@ -2415,14 +2679,21 @@ import {
                     player.mesh.rotation.y -= turnSpeed;
                     player.viewYaw = player.mesh.rotation.y;
                 }
-                // 炮台独立转向逻辑
-                if (keys[keyBindings[playerKey].turretLeft]) {
-                 player.turretYaw += turretTurnSpeed;
+                // 炮台独立转向逻辑（锁定模式下炮台/车身键和鼠标都控制整车转向）
+                if (localTurretLocked) {
+                    player.turretYaw = 0;
+                    if (keys[keyBindings[playerKey].turretLeft]) {
+                        player.mesh.rotation.y += turretTurnSpeed;
+                        player.viewYaw = player.mesh.rotation.y;
+                    }
+                    if (keys[keyBindings[playerKey].turretRight]) {
+                        player.mesh.rotation.y -= turretTurnSpeed;
+                        player.viewYaw = player.mesh.rotation.y;
+                    }
+                } else {
+                    if (keys[keyBindings[playerKey].turretLeft]) player.turretYaw += turretTurnSpeed;
+                    if (keys[keyBindings[playerKey].turretRight]) player.turretYaw -= turretTurnSpeed;
                 }
-                if (keys[keyBindings[playerKey].turretRight]) {
-                    player.turretYaw -= turretTurnSpeed;
-                }
-                // 应用旋转到炮台模型
                 if (player.turretMesh) {
                     player.turretMesh.rotation.y = player.turretYaw;
                 }
@@ -2432,7 +2703,7 @@ import {
                 if (keys[controls.right]) player.viewYaw -= turnSpeed;
             }
             // 长按持续开火，由武器冷却时间控制射速
-            if (canMove && keys[fireKey]) fire(playerKey);
+            if (canMove && (keys[fireKey] || mouseButton0)) fire(playerKey);
 
             if (canMove) {
                 keepTankInBounds(player);
@@ -2441,7 +2712,7 @@ import {
             }
         }
 
-        function renderView(cam, player, x, y, w, h) {
+        function renderView(cam, player, viewerRole, x, y, w, h) {
             const isSatelliteView = player.usingSatellite || player.satelliteFiring;
             const isScoping = !isSatelliteView && player.scoping;
             const fov = isSatelliteView ? 70 : (isScoping ? SCOPE_FOV : NORMAL_FOV);
@@ -2479,7 +2750,7 @@ import {
             cam.updateProjectionMatrix();
             renderer.setViewport(x, y, w, h);
             renderer.setScissor(x, y, w, h);
-            applyStealthForCamera(myRole);
+            applyStealthForCamera(viewerRole);
             renderer.render(scene, cam);
             if (isScoping) drawScopeOverlay(x, y, w, h);
             if (isSatelliteView) drawSatelliteOverlay(player, cam, x, y, w, h);
@@ -2834,6 +3105,10 @@ import {
 
         // 真正开始战斗：只由服务器广播的配置触发
         function startGame(config) {
+            // 每局强制重置统一 seed，避免对局中本地随机消耗导致下一局地图不一致
+            const roundSeed = Number(config && config.mapSeed);
+            worldSeed = Number.isFinite(roundSeed) ? (roundSeed >>> 0) : 123456;
+            spectateTargetRole = null;
             damagePopups.length = 0;
             // 战斗事件监听只注册一次，避免多局后叠加导致重复伤害/重复开火
             if (!enemyPosHandler) {
@@ -2908,7 +3183,9 @@ import {
                         players[role].stunEndTime = Date.now() + data.stunMs;
                     }
                     if (data.weapon === 'toxic' && typeof data.poisonEndAt === 'number') {
-                        players[role].poisonEndTime = data.poisonEndAt;
+                        const now = Date.now();
+                        const minPoisonMs = WEAPONS.toxic?.dotDurationPerHit ?? 2000;
+                        players[role].poisonEndTime = Math.max(data.poisonEndAt, now + minPoisonMs);
                     }
                     if (data.weapon === 'blindgun' && typeof data.blindMs === 'number') {
                         players[role].blindEndTime = Date.now() + data.blindMs;
@@ -3011,6 +3288,14 @@ import {
                 const patch = grassPatches.pop();
                 if (patch && patch.mesh) scene.remove(patch.mesh);
             }
+            while (obstacles.length) {
+                const rock = obstacles.pop();
+                if (rock) scene.remove(rock);
+            }
+            while (ponds.length) {
+                const pond = ponds.pop();
+                if (pond) scene.remove(pond);
+            }
             if (poisonCircle) {
                 scene.remove(poisonCircle);
                 if (poisonCircle.geometry) poisonCircle.geometry.dispose();
@@ -3022,11 +3307,13 @@ import {
                 satellitePickup = null;
             }
 
-            // 按主机配置重建建筑物（数量可控）
+            // 按统一 seed 与主机配置重建地图，确保各端草丛/建筑/池塘/岩石一致
             for (const b of buildings) {
                 scene.remove(b);
             }
             buildings.length = 0;
+            spawnRocks();
+            spawnPonds();
             spawnBuildings(typeof config.buildingCount === 'number' ? config.buildingCount : null);
 
 
@@ -3045,6 +3332,7 @@ import {
                 if (!rolesToSpawn.includes(role)) {
                     p.mesh = null;
                     p.turretMesh = null;
+                    p.shieldMesh = null;
                     p.muzzle = null;
                     p.hp = 0;
                     p.alive = false;
@@ -3056,6 +3344,7 @@ import {
                 const tank = createTank(p.color);
                 p.mesh = tank.group;
                 p.turretMesh = tank.turretGroup;
+                p.shieldMesh = tank.shieldMesh;
                 p.muzzle = tank.muzzle;
                 p.turretYaw = 0;
                 p.weapon = 'mg';
@@ -3228,6 +3517,7 @@ import {
             updateBullets(deltaSeconds);
             updatePoisonDamage(deltaSeconds);
             updateHitFlash();
+            updateShieldVisibility();
             updateStunVisual();
             updatePoisonVisual();
             updateBlindWorldVisibility(tickNow);
@@ -3235,9 +3525,22 @@ import {
             updateExplosions(now);
             drawMinimaps();
 
-            // 联机时只展示本机角色视角，占满全屏
+            // 联机时只展示一个视角；本机死亡后进入观战并可左右切换目标
             const activeCamera = myRole === 'p1' ? cam1 : cam2;
-            renderView(activeCamera, players[myRole], 0, 0, window.innerWidth, window.innerHeight);
+            const me = players[myRole];
+            let viewRole = myRole;
+            let viewerRole = myRole;
+            if (me && (!me.alive || me.hp <= 0)) {
+                const targetRole = ensureSpectateTargetRole();
+                if (targetRole) {
+                    viewRole = targetRole;
+                    viewerRole = targetRole;
+                }
+            } else {
+                spectateTargetRole = null;
+            }
+            const viewPlayer = players[viewRole] || players[myRole];
+            renderView(activeCamera, viewPlayer, viewerRole, 0, 0, window.innerWidth, window.innerHeight);
             updateDamagePopups(now, activeCamera);
             updateBlindOverlay(tickNow, activeCamera);
 
@@ -3339,6 +3642,7 @@ import {
             player.alive = false;
             player.hp = 0;
             if (role === myRole) stopLowHpLoop();
+            if (role === myRole) ensureSpectateTargetRole();
             player.blindEndTime = 0;
             updatePlayerHud(role);
 
@@ -3367,7 +3671,8 @@ import {
 
             // 在死亡位置触发一次爆炸动画
             createExplosionAt(pos);
-            playSfx('deathExplosion', { volume: 0.9, cooldownMs: 120 });
+            // 死亡爆炸按距离衰减，避免全图都听到
+            playPositionalSfx('deathExplosion', pos, { minDist: 6, maxDist: 58, baseVolume: 0.95, cooldownMs: 120 });
 
             // 检查是否只剩最后一名存活者
             const playingRoles = (activeRoles && activeRoles.length > 0)
@@ -3416,6 +3721,7 @@ import {
 
         // 战斗结束后返回主菜单（计分板由服务端广播 clear_scoreboard 统一清零）
         function goToLobby() {
+            spectateTargetRole = null;
             damagePopups.length = 0;
             document.getElementById('winner-msg').style.display = 'none';
             document.getElementById('setup-ui').style.display = 'flex';

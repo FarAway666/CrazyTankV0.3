@@ -23,8 +23,15 @@ function getDefaultConfig() {
         bulletSpreadEnabled: true,
         minesEnabled: true,
         satelliteLaserEnabled: true,
-        buildingCount: 6
+        buildingCount: 6,
+        mapSeed: Date.now() >>> 0
     };
+}
+
+function withRoundMapSeed(config) {
+    const base = (config && typeof config === 'object') ? { ...config } : getDefaultConfig();
+    base.mapSeed = Date.now() >>> 0;
+    return base;
 }
 
 function allActiveReady() {
@@ -204,7 +211,7 @@ io.on('connection', (socket) => {
     socket.on('start_request', (data) => {
         if (data && data.role !== 'p1') return;
         if (!allActiveReady()) return;
-        const configToEmit = (hostConfig && typeof hostConfig === 'object') ? hostConfig : getDefaultConfig();
+        const configToEmit = withRoundMapSeed((hostConfig && typeof hostConfig === 'object') ? hostConfig : getDefaultConfig());
         io.emit('start_game', configToEmit);
         readyState = { p1: false, p2: false, p3: false, p4: false };
         emitReadyUpdate();
@@ -217,7 +224,7 @@ io.on('connection', (socket) => {
         if (data && data.config && typeof data.config === 'object') hostConfig = data.config;
         nextRoundReady[role] = true;
         if (!allNextRoundReady()) return;
-        const configToEmit = (hostConfig && typeof hostConfig === 'object') ? hostConfig : getDefaultConfig();
+        const configToEmit = withRoundMapSeed((hostConfig && typeof hostConfig === 'object') ? hostConfig : getDefaultConfig());
         io.emit('start_game', configToEmit);
         nextRoundReady = { p1: false, p2: false, p3: false, p4: false };
         emitReadyUpdate();
