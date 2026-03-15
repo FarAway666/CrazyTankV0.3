@@ -2,11 +2,12 @@ const express = require('express');
 const app = express();
 const http = require('http').Server(app);
 const io = require('socket.io')(http);
-const path = require('path');
 
 app.use(express.static(__dirname, { dotfiles: 'allow' }));
 
 let players = {};
+// 各角色玩家自定义名称（所有人可见）
+let playerNames = { p1: '', p2: '', p3: '', p4: '' };
 // 支持 p1 / p2 / p3 / p4 四个角色，按顺序轮流分配
 const ROLE_CYCLE = ['p1', 'p2', 'p3', 'p4'];
 let nextRoleIndex = 0;
@@ -18,11 +19,13 @@ let nextRoundReady = { p1: false, p2: false, p3: false, p4: false };
 
 function getDefaultConfig() {
     return {
-        collisionDamageEnabled: true,
-        poisonCircleEnabled: true,
+        collisionDamageEnabled: false,
+        unlockAllWeapons: false,
+        poisonCircleEnabled: false,
         bulletSpreadEnabled: true,
         minesEnabled: true,
         satelliteLaserEnabled: true,
+        mapId: 'grassland',
         buildingCount: 6,
         mapSeed: Date.now() >>> 0
     };
@@ -85,6 +88,7 @@ io.on('connection', (socket) => {
     // 告诉新加入的玩家当前已经在线的所有角色，用于刷新“已加入”状态
     const activeRoles = Array.from(new Set(Object.values(players)));
     socket.emit('current_players', { roles: activeRoles });
+    socket.emit('player_names_sync', { names: { ...playerNames } });
     // 新连接也同步一次准备状态（带 _seq:0，避免与首轮 emitReadyUpdate 的 seq:1 冲突导致主机漏应用“全部准备”）
     const readyInit = {};
     for (const r of ROLE_CYCLE) readyInit[r] = !!readyState[r];
@@ -167,6 +171,22 @@ io.on('connection', (socket) => {
         });
     });
 
+    // 护盾受击：主机上报，广播给所有客户端
+    socket.on('shield_hit', (data) => {
+        const reporterRole = players[socket.id];
+        if (reporterRole !== 'p1') return;
+        if (!data || !data.targetRole || typeof data.shieldHp !== 'number') return;
+        io.emit('shield_hit', data);
+    });
+
+    // 武器箱解锁：主机上报，广播给所有客户端
+    socket.on('weapon_unlock', (data) => {
+        const reporterRole = players[socket.id];
+        if (reporterRole !== 'p1') return;
+        if (!data || !data.role || !data.weapon) return;
+        io.emit('weapon_unlock', data);
+    });
+
     // 转发武器切换，同步多方武器状态
     socket.on('weapon_switch', (data) => {
         // data: { role: 'p1' | 'p2' | 'p3', weapon: 'mg' | 'cannon' }
@@ -213,6 +233,8 @@ io.on('connection', (socket) => {
         if (!allActiveReady()) return;
         const configToEmit = withRoundMapSeed((hostConfig && typeof hostConfig === 'object') ? hostConfig : getDefaultConfig());
         io.emit('start_game', configToEmit);
+        // 开局时重广播名称，确保所有客户端（含晚加入或漏收 player_names_update 的）拿到最新名称
+        io.emit('player_names_update', { names: { ...playerNames } });
         readyState = { p1: false, p2: false, p3: false, p4: false };
         emitReadyUpdate();
     });
@@ -226,6 +248,7 @@ io.on('connection', (socket) => {
         if (!allNextRoundReady()) return;
         const configToEmit = withRoundMapSeed((hostConfig && typeof hostConfig === 'object') ? hostConfig : getDefaultConfig());
         io.emit('start_game', configToEmit);
+        io.emit('player_names_update', { names: { ...playerNames } });
         nextRoundReady = { p1: false, p2: false, p3: false, p4: false };
         emitReadyUpdate();
     });
@@ -235,12 +258,23 @@ io.on('connection', (socket) => {
         io.emit('clear_scoreboard');
     });
 
+    socket.on('set_my_name', (data) => {
+        const role = players[socket.id];
+        if (!role || role !== data.role) return;
+        const name = (data.name && String(data.name).trim().slice(0, 12)) || '';
+        playerNames[role] = name;
+        const payload = { role, name, names: { ...playerNames } };
+        io.emit('player_names_update', payload);
+    });
+
     socket.on('disconnect', () => {
         const role = players[socket.id];
         delete players[socket.id];
         console.log('玩家断开');
         if (role) {
             io.emit('player_left', { role });
+            playerNames[role] = '';
+            io.emit('player_names_update', { role, name: '', names: { ...playerNames } });
         }
         // 断线的角色标记为未准备
         if (role && readyState.hasOwnProperty(role)) {

@@ -5,6 +5,26 @@ body {
     font-family: 'Microsoft YaHei', sans-serif;
 }
 
+html.touch-device,
+body.touch-device {
+    user-select: none;
+    -webkit-user-select: none;
+    -ms-user-select: none;
+    -webkit-touch-callout: none;
+    touch-action: manipulation;
+}
+
+html.touch-device * {
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+html.touch-device input,
+html.touch-device textarea {
+    user-select: text;
+    -webkit-user-select: text;
+}
+
 #setup-ui {
     position: absolute;
     inset: 0;
@@ -142,6 +162,54 @@ body {
 
 #settings-modal.open {
     display: flex;
+}
+
+#role-assign-modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 350;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(6px);
+}
+
+#role-assign-modal.open {
+    display: flex;
+}
+
+.role-assign-panel {
+    min-width: 320px;
+}
+
+.role-assign-desc {
+    margin: 12px 0 16px;
+    color: #d6ddf7;
+    font-size: 15px;
+    text-align: center;
+}
+
+.role-assign-input {
+    width: 100%;
+    padding: 12px 16px;
+    margin-bottom: 20px;
+    border-radius: 10px;
+    border: 2px solid rgba(0, 242, 255, 0.4);
+    background: rgba(255, 255, 255, 0.08);
+    color: white;
+    font-size: 16px;
+    font-family: inherit;
+    box-sizing: border-box;
+}
+
+.role-assign-input::placeholder {
+    color: rgba(255, 255, 255, 0.4);
+}
+
+.role-assign-input:focus {
+    outline: none;
+    border-color: #00f2ff;
 }
 
 .keybind-panel {
@@ -356,6 +424,7 @@ button {
     border: 2px solid #fff;
     border-radius: 10px;
     overflow: hidden;
+    box-sizing: border-box;
 }
 
 .right .hp-bar {
@@ -365,13 +434,20 @@ button {
 .hp-fill {
     height: 100%;
     width: 100%;
+    min-width: 0;
     transition: width 0.12s;
+    box-sizing: border-box;
 }
 
 #p1-hp { background: #00f2ff; }
 #p2-hp { background: #ff512f; }
 #p3-hp { background: #00ff7f; }
 #p4-hp { background: #fff000; }
+
+/* 敌人使用护盾时，其血条显示护盾血量并采用护盾渐变色 */
+.hp-fill.hp-fill-shield {
+    background: linear-gradient(90deg, rgba(136, 204, 255, 0.9), rgba(200, 230, 255, 0.85)) !important;
+}
 
 /* 体力条（仅自己可见） */
 .stamina-wrap {
@@ -393,12 +469,51 @@ button {
     border: 1px solid rgba(255, 255, 255, 0.28);
     border-radius: 999px;
     overflow: hidden;
+    box-sizing: border-box;
 }
 
 .stamina-fill {
     height: 100%;
     width: 100%;
     background: linear-gradient(90deg, rgba(0, 242, 255, 0.95), rgba(255, 255, 255, 0.75));
+    transition: width 0.12s;
+}
+
+.shield-hp-wrap {
+    position: absolute;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 20px;
+    border-radius: 12px;
+    background: rgba(0, 68, 136, 0.4);
+    border: 1px solid rgba(136, 204, 255, 0.35);
+    color: white;
+    font-size: 14px;
+}
+
+.shield-hp-label {
+    font-weight: bold;
+    color: rgba(136, 204, 255, 0.95);
+}
+
+.shield-hp-bar {
+    width: 200px;
+    height: 10px;
+    background: rgba(0, 0, 0, 0.45);
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 999px;
+    overflow: hidden;
+}
+
+.shield-hp-fill {
+    height: 100%;
+    width: 100%;
+    background: linear-gradient(90deg, rgba(136, 204, 255, 0.9), rgba(200, 230, 255, 0.85));
     transition: width 0.12s;
 }
 
@@ -609,3 +724,283 @@ button {
     60% { opacity: 1; }
     100% { opacity: 0; }
 }
+
+/* 移动端虚拟控制 */
+#mobile-controls {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    pointer-events: none;
+}
+
+#mobile-controls > * {
+    pointer-events: auto;
+}
+
+#mc-joystick {
+    display: none;
+    position: fixed;
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.4);
+    border: 3px solid rgba(255, 255, 255, 0.5);
+    touch-action: none;
+}
+
+#mc-joystick-knob {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 44px;
+    height: 44px;
+    margin-left: -22px;
+    margin-top: -22px;
+    border-radius: 50%;
+    background: rgba(0, 242, 255, 0.7);
+    border: 2px solid rgba(255, 255, 255, 0.8);
+    transition: transform 0.05s;
+}
+
+.mc-btn {
+    position: fixed;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 112px;
+    height: 112px;
+    padding: 0;
+    border-radius: 20px;
+    border: 3px solid rgba(255, 255, 255, 0.6);
+    background: rgba(0, 0, 0, 0.5);
+    color: white;
+    font-size: 22px;
+    font-weight: bold;
+    font-family: inherit;
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.mc-icon {
+    width: 64px;
+    height: 64px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.mc-icon svg {
+    width: 100%;
+    height: 100%;
+}
+
+.mc-icon-text {
+    line-height: 1;
+}
+
+/* 开火键：圆形、放大一倍，靠近屏幕中心 */
+.mc-fire-btn {
+    width: 224px;
+    height: 224px;
+    right: 20%;
+    bottom: 30%;
+    transform: translate(100px, 100px);
+    border-radius: 50%;
+    background: rgba(255, 80, 80, 0.7);
+}
+
+.mc-fire-btn .mc-icon {
+    width: 80px;
+    height: 80px;
+}
+
+.mc-fire-btn .mc-icon-text {
+    font-size: 24px;
+}
+
+/* 武器/瞄准/地雷：右下角紧凑堆叠 */
+.mc-weapon-btn {
+    right: 16px;
+    bottom: 16px;
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.mc-scope-btn {
+    right: 16px;
+    bottom: 140px;
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.mc-mine-btn {
+    right: 16px;
+    bottom: 264px;
+    background: rgba(255, 255, 255, 0.2);
+}
+
+/* 加速按钮：地图右侧，切换模式 */
+.mc-boost-btn {
+    width: 96px;
+    height: 96px;
+    right: 1350px;
+    top: 90%;
+    transform: translateY(-50%);
+    gap: 4px;
+    font-size: 16px;
+    border-width: 2px;
+    background: rgba(255, 255, 11, 0.559);
+}
+
+.mc-boost-btn .mc-icon {
+    width: 40px;
+    height: 40px;
+}
+
+/* 小屏时按钮稍紧凑 */
+@media (max-height: 600px) {
+    .mc-btn {
+        width: 96px;
+        height: 96px;
+        font-size: 14px;
+    }
+    .mc-icon {
+        width: 34px;
+        height: 34px;
+    }
+    .mc-fire-btn {
+        width: 192px;
+        height: 192px;
+        transform: translate(70px, 70px);
+    }
+    .mc-fire-btn .mc-icon {
+        width: 64px;
+        height: 64px;
+    }
+    .mc-weapon-btn { bottom: 12px; right: 12px; }
+    .mc-scope-btn { bottom: 120px; right: 12px; }
+    .mc-mine-btn { bottom: 228px; right: 12px; }
+    .mc-boost-btn { right: 16px; width: 80px; height: 80px; font-size: 14px; }
+}
+
+/* 横屏时：开火键仍靠中心，其他三个横向排列 */
+@media (min-aspect-ratio: 1/1) and (max-height: 500px) {
+    .mc-btn {
+        width: 96px;
+        height: 96px;
+    }
+    .mc-fire-btn {
+        width: 192px;
+        height: 192px;
+        right: 50%;
+        bottom: 50%;
+        transform: translate(60px, 0);
+    }
+    .mc-weapon-btn { right: 16px; bottom: 12px; }
+    .mc-scope-btn { right: 124px; bottom: 12px; }
+    .mc-mine-btn { right: 232px; bottom: 12px; }
+    .mc-boost-btn { right: 16px; top: 50%; transform: translateY(-50%); width: 88px; height: 88px; }
+}
+
+/* 手机端 UI 布局优化 */
+body.touch-device .hud-self {
+    top: 12px;
+    width: min(280px, 85vw);
+}
+
+body.touch-device .hud-self .p-name {
+    font-size: 18px;
+}
+
+body.touch-device .hud-self .hp-bar,
+body.touch-device .hud-self .stamina-bar {
+    width: 100%;
+    max-width: 100%;
+}
+
+body.touch-device .hud-self .hud-meta {
+    font-size: 13px;
+}
+
+/* 其他玩家 HUD 移至右侧，避免与左侧摇杆重叠 */
+body.touch-device .hud-other-1,
+body.touch-device .hud-other-2,
+body.touch-device .hud-other-3 {
+    left: auto;
+    right: 12px;
+    width: 140px;
+    text-align: right;
+}
+
+body.touch-device .hud-other-1 {
+    top: 28%;
+}
+
+body.touch-device .hud-other-2 {
+    top: 44%;
+}
+
+body.touch-device .hud-other-3 {
+    top: 60%;
+}
+
+/* 其他玩家血条：宽度适配容器，避免溢出 */
+body.touch-device .hud-other-1 .hp-bar,
+body.touch-device .hud-other-2 .hp-bar,
+body.touch-device .hud-other-3 .hp-bar {
+    width: 100%;
+    transform: none;
+    margin-left: auto;
+}
+
+body.touch-device .hud-other-1 .hud-meta,
+body.touch-device .hud-other-2 .hud-meta,
+body.touch-device .hud-other-3 .hud-meta {
+    justify-content: flex-end !important;
+}
+
+body.touch-device .hud-other-1 .p-name,
+body.touch-device .hud-other-2 .p-name,
+body.touch-device .hud-other-3 .p-name {
+    font-size: 14px;
+}
+
+body.touch-device .hud-other-1 .weapon-tag,
+body.touch-device .hud-other-2 .weapon-tag,
+body.touch-device .hud-other-3 .weapon-tag {
+    display: none;
+}
+
+/* 毒圈计时器移至右上，避免与血条重叠 */
+body.touch-device #poison-timer {
+    top: 12px;
+    right: 12px;
+    left: auto;
+    transform: none;
+    font-size: 14px;
+    padding: 6px 12px;
+}
+
+/* 比分榜与玩家状态在手机端更紧凑 */
+body.touch-device #scoreboard,
+body.touch-device #player-status {
+    padding: 8px 12px;
+    font-size: 12px;
+}
+
+body.touch-device #scoreboard {
+    top: 8px;
+    right: 8px;
+    min-width: 140px;
+}
+
+body.touch-device #player-status {
+    top: 8px;
+    left: 8px;
+    min-width: 160px;
+}
+
+/* 虚拟按钮在手机端已放大，无需额外覆盖 */

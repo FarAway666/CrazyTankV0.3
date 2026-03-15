@@ -3,6 +3,9 @@
 <head>
 <script src="/socket.io/socket.io.js"></script>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
     <title>坦克突击：全武装对决</title>
     <link rel="stylesheet" href="style.css">
 </head>
@@ -34,10 +37,10 @@
             <p class="keybind-tip">以下设置以主机（P1）为准，开局后会同步给所有玩家。</p>
             <div class="toggle-list">
                 <div class="toggle-item">
-                    <button id="collision-damage" class="toggle-btn active" type="button">碰撞伤害</button>
+                    <button id="collision-damage" class="toggle-btn" type="button">碰撞伤害</button>
                 </div>
                 <div class="toggle-item">
-                    <button id="poison-circle" class="toggle-btn active" type="button">毒圈</button>
+                    <button id="poison-circle" class="toggle-btn" type="button">毒圈</button>
                 </div>
                 <div class="toggle-item">
                     <button id="bullet-spread" class="toggle-btn active" type="button">弹道偏移</button>
@@ -48,12 +51,42 @@
                 <div class="toggle-item">
                     <button id="satellite-laser" class="toggle-btn active" type="button">卫星激光炮</button>
                 </div>
+                <div class="toggle-item">
+                    <button id="unlock-all-weapons" class="toggle-btn" type="button">解锁全部武器</button>
+                </div>
             </div>
             <div style="margin-top:14px;color:#e0e8ff;font-size:13px;">
+                地图：
+                <select id="map-select" style="margin-left:8px;padding:6px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:white;pointer-events:auto;">
+                    <option value="grassland">草原</option>
+                    <option value="desert">沙漠</option>
+                    <option value="jungle">丛林</option>
+                    <option value="volcano">火山</option>
+                </select>
+            </div>
+            <div style="margin-top:10px;color:#e0e8ff;font-size:13px;">
                 建筑物数量：
                 <input id="building-count" type="number" min="0" max="20" value="6" style="width:72px;margin-left:8px;padding:6px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:white;pointer-events:auto;">
             </div>
+            <div style="margin-top:16px;color:#e0e8ff;font-size:13px;">
+                <div style="margin-bottom:8px;">坦克名称（仅本机显示）：</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;">
+                    <div><span class="p1-color">P1</span> <input id="name-p1" type="text" maxlength="12" placeholder="蓝色坦克" style="width:100%;padding:6px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:white;margin-top:4px;"></div>
+                    <div><span class="p2-color">P2</span> <input id="name-p2" type="text" maxlength="12" placeholder="红色坦克" style="width:100%;padding:6px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:white;margin-top:4px;"></div>
+                    <div><span class="p3-color">P3</span> <input id="name-p3" type="text" maxlength="12" placeholder="绿色坦克" style="width:100%;padding:6px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:white;margin-top:4px;"></div>
+                    <div><span class="p4-color">P4</span> <input id="name-p4" type="text" maxlength="12" placeholder="黄色坦克" style="width:100%;padding:6px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:white;margin-top:4px;"></div>
+                </div>
+            </div>
             <button id="close-settings" class="keybind-close-btn" type="button">确定</button>
+        </div>
+    </div>
+
+    <div id="role-assign-modal">
+        <div class="keybind-panel role-assign-panel">
+            <h2 id="role-assign-title">你被分配至</h2>
+            <p class="role-assign-desc">请输入你的名称</p>
+            <input id="role-assign-name" type="text" maxlength="12" placeholder="输入名称" class="role-assign-input">
+            <button id="role-assign-confirm" class="keybind-close-btn" type="button">确定</button>
         </div>
     </div>
 
@@ -70,7 +103,7 @@
     <div id="ui">
         <div class="hud-row">
             <div class="p-info" id="hud-p1">
-                <div class="p-name p1-color">蓝色坦克 (P1)</div>
+                <div id="p1-name" class="p-name p1-color">蓝色坦克 (P1)</div>
                 <div class="hud-meta">
                     <span id="p1-hp-text">HP 100</span>
                     <span id="p1-weapon-text" class="weapon-tag">武器：机枪</span>
@@ -85,7 +118,7 @@
                 </div>
             </div>
             <div class="p-info" id="hud-p3">
-                <div class="p-name p3-color">绿色坦克 (P3)</div>
+                <div id="p3-name" class="p-name p3-color">绿色坦克 (P3)</div>
                 <div class="hud-meta">
                     <span id="p3-hp-text">HP 100</span>
                     <span id="p3-weapon-text" class="weapon-tag">武器：机枪</span>
@@ -93,7 +126,7 @@
                 <div class="hp-bar"><div id="p3-hp" class="hp-fill"></div></div>
             </div>
             <div class="p-info" id="hud-p2">
-                <div class="p-name p2-color">红色坦克 (P2)</div>
+                <div id="p2-name" class="p-name p2-color">红色坦克 (P2)</div>
                 <div class="hud-meta">
                     <span id="p2-hp-text">HP 100</span>
                     <span id="p2-weapon-text" class="weapon-tag">武器：机枪</span>
@@ -101,7 +134,7 @@
                 <div class="hp-bar"><div id="p2-hp" class="hp-fill"></div></div>
             </div>
             <div class="p-info" id="hud-p4">
-                <div class="p-name p4-color">黄色坦克 (P4)</div>
+                <div id="p4-name" class="p-name p4-color">黄色坦克 (P4)</div>
                 <div class="hud-meta">
                     <span id="p4-hp-text">HP 100</span>
                     <span id="p4-weapon-text" class="weapon-tag">武器：机枪</span>
@@ -110,11 +143,16 @@
             </div>
         </div>
         <div id="poison-timer">毒圈: 150s</div>
+        <div id="shield-hp-wrap" class="shield-hp-wrap" style="display:none">
+            <span class="shield-hp-label">护盾</span>
+            <span id="shield-hp-text">200</span>
+            <div class="shield-hp-bar"><div id="shield-hp-fill" class="shield-hp-fill"></div></div>
+        </div>
     </div>
 
     <div id="control-guide">
         <div class="guide-column">
-            <h3 class="p1-color">蓝色坦克 (P1) 操作</h3>
+            <h3 id="guide-p1" class="p1-color">蓝色坦克 (P1) 操作</h3>
             <p>W/S - 前进/后退</p>
             <p>A/D - 左右转向</p>
             <p>空格键 - 开火</p>
@@ -123,7 +161,7 @@
             <p>双击方向键 - 加速移动</p>
         </div>
         <div class="guide-column">
-            <h3 class="p2-color">红色坦克 (P2) 操作</h3>
+            <h3 id="guide-p2" class="p2-color">红色坦克 (P2) 操作</h3>
             <p>↑/↓ - 前进/后退</p>
             <p>←/→ - 左右转向</p>
             <p>回车键 - 开火</p>
@@ -134,6 +172,33 @@
     </div>
 
     <div id="weapon-switch-toast">机枪</div>
+
+    <div id="mobile-controls">
+        <div id="mc-joystick">
+            <div id="mc-joystick-knob"></div>
+        </div>
+        <button id="mc-fire" type="button" class="mc-btn mc-fire-btn">
+            <span class="mc-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><line x1="12" y1="4" x2="12" y2="8"/><line x1="12" y1="16" x2="12" y2="20"/><line x1="4" y1="12" x2="8" y2="12"/><line x1="16" y1="12" x2="20" y2="12"/></svg></span>
+            <span class="mc-icon-text">开火</span>
+        </button>
+        <button id="mc-weapon" type="button" class="mc-btn mc-weapon-btn">
+            <span class="mc-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 16V4l-4 4"/><path d="M17 8v12l4-4"/><path d="M3 12h18"/></svg></span>
+            <span class="mc-icon-text">武器</span>
+        </button>
+        <button id="mc-scope" type="button" class="mc-btn mc-scope-btn">
+            <span class="mc-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><circle cx="11" cy="11" r="3"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
+            <span class="mc-icon-text">瞄准</span>
+        </button>
+        <button id="mc-mine" type="button" class="mc-btn mc-mine-btn">
+            <span class="mc-icon"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg></span>
+            <span class="mc-icon-text">地雷</span>
+        </button>
+        <button id="mc-boost" type="button" class="mc-btn mc-boost-btn">
+            <span class="mc-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></span>
+            <span class="mc-icon-text">加速</span>
+        </button>
+    </div>
+
     <canvas id="minimap-canvas"></canvas>
     <canvas id="scope-canvas"></canvas>
     <canvas id="blind-overlay"></canvas>
