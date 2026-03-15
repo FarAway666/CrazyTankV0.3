@@ -41,27 +41,31 @@ const SATELLITE_WARNING_MS = 1000;
 const SATELLITE_EFFECT_MS = 1500;
 const SATELLITE_RESPAWN = 30000;
 const SHIELD_RADIUS = 3.5;  // 护盾半径，在此修改护盾大小
-const SHIELD_OFFSET_FORWARD = 1.8;  // 【修改护盾位置】护盾中心相对炮台的前向偏移（单位），视觉与碰撞共用
+const SHIELD_OFFSET_FORWARD = 2.2;  // 【修改护盾位置】护盾中心相对炮台的前向偏移（单位），视觉与碰撞共用
 const SHIELD_OFFSET_Y = 1.1;  // 【修改护盾位置】护盾中心相对地面的高度
-const SHIELD_HIT_MARGIN = 0.2;  // 护盾碰撞判定余量，避免高速子弹穿透
+const SHIELD_HIT_MARGIN = 0.8;  // 护盾碰撞判定余量，避免高速子弹穿透
 const SHIELD_OPACITY = 0.2;  // 护盾主体透明度（0=全透明，1=不透明）
 const SHIELD_OUTLINE_OPACITY = 0.5;  // 护盾描边层透明度
 const SHIELD_EDGE_OPACITY = 0.85;  // 护盾边缘线透明度
 const SHIELD_MAX_HP = 100;  // 护盾最大生命值
 const SHIELD_REGEN_PER_SEC = 2;  // 护盾每秒恢复血量
 const SHIELD_LOW_HP_THRESHOLD = 50;  // 护盾低于此值无法切换至护盾武器
-// 球状闪电：在此修改伤害范围、伤害间隔、持续时长
-const BALL_LIGHTNING_DAMAGE_RADIUS = 9;
-const BALL_LIGHTNING_DAMAGE_TICK_MS = 350;
-const BALL_LIGHTNING_DURATION_MS = 5500;
 // 地图主题：房主在主菜单选择
 const MAP_THEMES = {
     grassland: { name: '草原', floor: 0x5e8c4f, grid: 0x446644, sky: 0x87ceeb, grassBase: 0x2f5f2a, grassBlade: 0x4b9f40, water: 0x1c4bd6, waterRim: 0x2b6d2f, rock: 0x777777, building: 0x5c636f, buildingTop: 0x3a4049, grassCount: 1 },
     desert: { name: '沙漠', floor: 0xd4a574, grid: 0xb8956a, sky: 0xffd4a3, grassBase: 0x8b7355, grassBlade: 0xa08060, water: 0x2a7dd4, waterRim: 0x6b8e6b, rock: 0x9a7b5a, building: 0xc4a574, buildingTop: 0xa08050, grassCount: 0.3 },
-    jungle: { name: '丛林', floor: 0x2d5a27, grid: 0x1e4a1a, sky: 0x4a7c59, grassBase: 0x1e4a1a, grassBlade: 0x3d7a35, water: 0x1a3d5c, waterRim: 0x2d5a27, rock: 0x4a4a4a, building: 0x3d4a3d, buildingTop: 0x2d3a2d, grassCount: 1.5 },
+    jungle: { name: '丛林', floor: 0x2d5a27, grid: 0x1e4a1a, sky: 0x4a7c59, grassBase: 0x1e4a1a, grassBlade: 0x3d7a35, water: 0x1a3d5c, waterRim: 0x2d5a27, rock: 0x4a4a4a, building: 0x3d4a3d, buildingTop: 0x2d3a2d, grassCount: 1.5, treeTrunk: 0x4a3728, treeFoliage: 0x2d5a27, treeFoliageLight: 0x3d7a35 },
     volcano: { name: '火山', floor: 0x3d3535, grid: 0x2a2222, sky: 0x4a3030, grassBase: 0x2a2020, grassBlade: 0x3d2828, water: 0xff4400, waterRim: 0x8b2500, rock: 0x2a2a2a, building: 0x3d3535, buildingTop: 0x2a2222, grassCount: 0 }
 };
 const MAP_IDS = Object.keys(MAP_THEMES);
+
+// 火山地图岩浆：可进入，每秒伤害与灼烧视觉效果
+const LAVA_DAMAGE_PER_SEC = 10;
+const LAVA_BURN_COLOR = 0xff4400;
+
+// 炮台灵敏度：5 档，最低 0.2 最高 2.0
+const TURRET_SENSITIVITY_LEVELS = [0.2, 0.5, 1.0, 1.5, 2.0];
+const TURRET_SENSITIVITY_LABELS = ['极低', '低', '中', '高', '极高'];
 
 // 支持 2–4 人联机时的角色键列表
 const PLAYER_KEYS = ['p1', 'p2', 'p3', 'p4'];
@@ -135,10 +139,10 @@ const WEAPONS = {
     blindgun:{ name: '致盲弹', dmg: 3,   cd: 2000,  speed: 200, color: 0xf2f2f2, size: 0.12, blindDuration: 6000, blindVisionRadius: 35 },
     shield:   { name: '护盾',   dmg: 0,   cd: 99999, speed: 0,   color: 0x88ccff, size: 0.5 },
     apcannon: { name: '穿甲炮', dmg: 5, cd: 2500, speed: 950, color: 0xcccc00, size: 0.2,
-        piercingSpeed: 1, piercingDmgPerTick: 1, piercingDamageTickMs: 300 },
-    balllightning: { name: '球状闪电', dmg: 4, cd: 3500, speed: 20, color: 0xffff88, size: 0.6,
-        durationMs: 5500, damageRadius: 19, damageTickMs: 350,
-        slowDurationMs: 1200, slowMult: 0.45 }
+        piercingSpeed: 1, piercingDmgPerTick: 1, piercingDamageTickMs: 100 },
+    balllightning: { name: '球状闪电', dmg: 1.2, cd: 3500, speed: 20, color: 0xffff88, size: 0.8,
+        durationMs: 5500, damageRadius: 20, damageTickMs: 150,
+        slowDurationMs: 2000, slowMult: 0.25 }
 };
 
 export {
@@ -157,5 +161,7 @@ export {
     SATELLITE_TARGET_SPEED, SATELLITE_RADIUS, SATELLITE_DAMAGE, SATELLITE_WARNING_MS, SATELLITE_EFFECT_MS, SATELLITE_RESPAWN,
     SHIELD_RADIUS, SHIELD_OFFSET_FORWARD, SHIELD_OFFSET_Y, SHIELD_HIT_MARGIN, SHIELD_OPACITY, SHIELD_OUTLINE_OPACITY, SHIELD_EDGE_OPACITY,
     SHIELD_MAX_HP, SHIELD_REGEN_PER_SEC, SHIELD_LOW_HP_THRESHOLD,
+    LAVA_DAMAGE_PER_SEC, LAVA_BURN_COLOR,
+    TURRET_SENSITIVITY_LEVELS, TURRET_SENSITIVITY_LABELS,
     PLAYER_KEYS, DEFAULT_TANK_NAMES, ACTION_LABELS, DEFAULT_KEYS, WEAPONS
 };

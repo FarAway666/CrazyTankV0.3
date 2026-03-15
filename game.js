@@ -15,7 +15,9 @@ import {
     PLAYER_KEYS, DEFAULT_TANK_NAMES, ACTION_LABELS, DEFAULT_KEYS, WEAPONS, WEAPON_ORDER, BASE_WEAPONS, PREMIUM_WEAPONS,
     SHIELD_RADIUS, SHIELD_OFFSET_FORWARD, SHIELD_OFFSET_Y, SHIELD_HIT_MARGIN,
     SHIELD_OPACITY, SHIELD_OUTLINE_OPACITY, SHIELD_EDGE_OPACITY,
-    SHIELD_MAX_HP, SHIELD_REGEN_PER_SEC, SHIELD_LOW_HP_THRESHOLD
+    SHIELD_MAX_HP, SHIELD_REGEN_PER_SEC, SHIELD_LOW_HP_THRESHOLD,
+    LAVA_DAMAGE_PER_SEC, LAVA_BURN_COLOR,
+    TURRET_SENSITIVITY_LEVELS, TURRET_SENSITIVITY_LABELS
 } from './game-const.js';
 import { createMobileAdaptationContext, getAdaptiveViewportSize } from './mobile-adaptation.js';
 import { createMobileInputController } from './mobile-runtime.js';
@@ -170,8 +172,8 @@ import { createMobileInputController } from './mobile-runtime.js';
             p4: { ...DEFAULT_KEYS }
         };
 
-        // 炮台灵敏度（仅本机生效，0.5~2.0）
-        let localTurretSensitivity = 1.0;
+        // 炮台灵敏度（仅本机生效，5 档：0.2/0.5/1.0/1.5/2.0）
+        let localTurretSensitivityLevel = 2;
         // 炮台锁定车身（仅本机生效）
         let localTurretLocked = false;
 
@@ -522,8 +524,9 @@ import { createMobileInputController } from './mobile-runtime.js';
                     p.mesh.visible = true;
                     continue;
                 }
+                // 存活：近处可见；死亡尸体：仅近处可见，远处隐藏
                 const baseVisible = !p.inGrass && p.alive && p.hp > 0;
-                p.mesh.visible = baseVisible && near(p.mesh.position);
+                p.mesh.visible = (baseVisible || !p.alive) ? near(p.mesh.position) : false;
             }
             if (poisonCircle) poisonCircle.visible = false;
             if (satellitePickup && satellitePickup.mesh) satellitePickup.mesh.visible = near(satellitePickup.mesh.position);
@@ -630,6 +633,7 @@ import { createMobileInputController } from './mobile-runtime.js';
         let localReady = false;
         let remoteReady = false;
         let currentConfig = null;
+        let currentMapId = 'grassland';
         let blindWorldApplied = false;
         let spectateTargetRole = null;
         let enemyPosHandler = null;
@@ -869,7 +873,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                     <p>${getReadableKeyName(keyBindings.p1.forward)}/${getReadableKeyName(keyBindings.p1.backward)} - 前进/后退</p>
                     <p>${getReadableKeyName(keyBindings.p1.left)}/${getReadableKeyName(keyBindings.p1.right)} - 左右转向</p>
                     <p>${getReadableKeyName(keyBindings.p1.turretLeft)}/${getReadableKeyName(keyBindings.p1.turretRight)} 或 鼠标 - 炮台转向</p>
-                    <p>${getReadableKeyName(keyBindings.p1.turretSensitivityUp)}/${getReadableKeyName(keyBindings.p1.turretSensitivityDown)} - 炮台灵敏度+/-（仅自己）</p>
+                    <p>${getReadableKeyName(keyBindings.p1.turretSensitivityUp)}/${getReadableKeyName(keyBindings.p1.turretSensitivityDown)} - 炮台灵敏度+/-（5档，仅自己）</p>
                     <p>${getReadableKeyName(keyBindings.p1.turretLock)} - 炮台锁定车身（仅自己）</p>
                     <p>${getReadableKeyName(keyBindings.p1.fire)} 或 鼠标左键 - 开火</p>
                     <p>${getReadableKeyName(keyBindings.p1.weaponSwitch)} 或 滚轮 - 循环切换武器</p>
@@ -1129,6 +1133,18 @@ import { createMobileInputController } from './mobile-runtime.js';
             });
         }
 
+        function isPlayerInLava(playerKey) {
+            if (currentMapId !== 'volcano') return false;
+            const player = players[playerKey];
+            if (!player?.mesh) return false;
+            const x = player.mesh.position.x, z = player.mesh.position.z;
+            return ponds.some(pond => {
+                const dx = x - pond.position.x;
+                const dz = z - pond.position.z;
+                return Math.hypot(dx, dz) < (pond.userData.collisionRadius || 0);
+            });
+        }
+
         function isTooCloseToExistingBuilding(x, z, extra = 0) {
             return buildings.some(b => {
                 const dx = x - b.position.x;
@@ -1241,6 +1257,75 @@ import { createMobileInputController } from './mobile-runtime.js';
                 b.rotation.y = rand() * Math.PI * 2;
                 scene.add(b);
                 buildings.push(b);
+                created++;
+            }
+        }
+
+        function createTree(scale, x, z, theme) {
+            const t = theme || MAP_THEMES.grassland;
+            const trunkColor = t.treeTrunk ?? 0x4a3728;
+            const foliageColor = t.treeFoliage ?? 0x2d5a27;
+            const foliageLight = t.treeFoliageLight ?? 0x3d7a35;
+            const group = new THREE.Group();
+            const trunkHeight = 4 * scale;
+            const trunkRadius = 0.4 * scale;
+            const trunk = new THREE.Mesh(
+                new THREE.CylinderGeometry(trunkRadius * 1.1, trunkRadius * 1.3, trunkHeight, 8),
+                new THREE.MeshStandardMaterial({ color: trunkColor, roughness: 0.9, metalness: 0 })
+            );
+            trunk.position.y = trunkHeight / 2;
+            trunk.castShadow = true;
+            trunk.receiveShadow = true;
+            group.add(trunk);
+            const foliageRadius = 2.2 * scale;
+            const foliageHeight = 2.8 * scale;
+            const foliage = new THREE.Mesh(
+                new THREE.ConeGeometry(foliageRadius, foliageHeight, 10),
+                new THREE.MeshStandardMaterial({ color: foliageColor, roughness: 0.85, metalness: 0 })
+            );
+            foliage.position.y = trunkHeight;
+            foliage.castShadow = true;
+            foliage.receiveShadow = true;
+            group.add(foliage);
+            if (scale > 1.2) {
+                const topFoliage = new THREE.Mesh(
+                    new THREE.SphereGeometry(foliageRadius * 0.6, 8, 6),
+                    new THREE.MeshStandardMaterial({ color: foliageLight, roughness: 0.8, metalness: 0 })
+                );
+                topFoliage.position.y = trunkHeight + foliageHeight * 0.4;
+                topFoliage.castShadow = true;
+                group.add(topFoliage);
+            }
+            group.position.set(x, 0, z);
+            group.rotation.y = rand() * Math.PI * 2;
+            group.traverse(obj => { obj.castShadow = true; obj.receiveShadow = true; });
+            // 树的碰撞/子弹阻挡按树干底部半径，避免地面判定比模型大一圈
+            const collisionRadius = trunkRadius * 1.3;
+            group.userData.isObstacle = true;
+            group.userData.isTree = true;
+            group.userData.collisionRadius = collisionRadius;
+            return group;
+        }
+
+        function spawnTrees(theme) {
+            const t = theme || MAP_THEMES.grassland;
+            if (!t.treeTrunk) return;
+            const count = 35 + Math.floor(rand() * 25);
+            let created = 0;
+            let attempts = 0;
+            while (created < count && attempts < 500) {
+                attempts++;
+                const scale = 1 + rand() * 4.15;
+                const pos = randomGroundPosition(28);
+                if (Math.abs(pos.x) > MAP_HALF * 0.88 || Math.abs(pos.z) > MAP_HALF * 0.88) continue;
+                if (Math.hypot(pos.x, pos.z) < 30) continue;
+                const collisionRadius = 0.4 * scale * 1.3;
+                if (isTooCloseToExistingRock(pos.x, pos.z, collisionRadius + 5)) continue;
+                if (isTooCloseToExistingPond(pos.x, pos.z, collisionRadius + 8)) continue;
+                if (isTooCloseToExistingBuilding(pos.x, pos.z, collisionRadius + 6)) continue;
+                const tree = createTree(scale, pos.x, pos.z, theme);
+                scene.add(tree);
+                obstacles.push(tree);
                 created++;
             }
         }
@@ -1760,7 +1845,63 @@ import { createMobileInputController } from './mobile-runtime.js';
                     return true;
                 }
             }
-            // 子弹可以穿过池塘；建筑物由 obstacles 列表统一阻挡即可
+            for (const building of buildings) {
+                const dx = bulletPos.x - building.position.x;
+                const dz = bulletPos.z - building.position.z;
+                const distXZ = Math.hypot(dx, dz);
+                if (distXZ < (building.userData.collisionRadius || 0) + bullet.radius) {
+                    disposeBullet(bullet);
+                    bullets.splice(index, 1);
+                    return true;
+                }
+            }
+            // 子弹可以穿过池塘
+            return false;
+        }
+
+        // 护盾碰撞：子弹路径或当前位置与护盾相交则立刻阻挡，优先于坦克受击判定
+        function checkBulletShieldCollision(bullet, index, prevX, prevZ) {
+            const curX = bullet.mesh.position.x;
+            const curZ = bullet.mesh.position.z;
+            const bulletR = bullet.radius || 0;
+            const effectiveRadius = SHIELD_RADIUS + bulletR + SHIELD_HIT_MARGIN;
+            for (const key of PLAYER_KEYS) {
+                if (key === bullet.owner) continue;
+                const target = players[key];
+                if (!target?.mesh || !target.alive || target.hp <= 0) continue;
+                if (target.weapon !== 'shield' || !target.turretMesh || (target.shieldHp ?? SHIELD_MAX_HP) <= 0) continue;
+                const totalYaw = target.mesh.rotation.y + target.turretYaw;
+                const shieldCenterX = target.mesh.position.x + SHIELD_OFFSET_FORWARD * Math.sin(totalYaw);
+                const shieldCenterZ = target.mesh.position.z - SHIELD_OFFSET_FORWARD * Math.cos(totalYaw);
+                const distToSegment = pointToSegmentDistance2D(shieldCenterX, shieldCenterZ, prevX, prevZ, curX, curZ);
+                const distToCur = Math.hypot(curX - shieldCenterX, curZ - shieldCenterZ);
+                if (distToSegment < effectiveRadius || distToCur < effectiveRadius) {
+                    if (isHostRole()) {
+                        let dmg = bullet.dmg;
+                        if (bullet.weapon === 'shotgun' && bullet.origin) {
+                            const odx = curX - bullet.origin.x;
+                            const odz = curZ - bullet.origin.z;
+                            const factor = Math.max(0.5, 1 - Math.hypot(odx, odz) / 60);
+                            dmg *= factor;
+                        }
+                        const curShield = target.shieldHp ?? SHIELD_MAX_HP;
+                        const newShieldHp = Math.max(0, curShield - dmg);
+                        target.shieldHp = newShieldHp;
+                        target.shieldHitT = 4;
+                        const shieldPos = new THREE.Vector3(shieldCenterX, target.mesh.position.y + SHIELD_OFFSET_Y, shieldCenterZ);
+                        playPositionalSfx(newShieldHp <= 0 ? 'shieldBreak' : 'shieldHit', shieldPos, { minDist: 4, maxDist: 52, baseVolume: 0.95, cooldownMs: 100 });
+                        socket.emit('shield_hit', { targetRole: key, shieldHp: newShieldHp });
+                        if (newShieldHp <= 0) {
+                            target.weapon = 'mg';
+                            socket.emit('weapon_switch', { role: key, weapon: 'mg' });
+                            updatePlayerHud(key);
+                        }
+                    }
+                    disposeBullet(bullet);
+                    bullets.splice(index, 1);
+                    return true;
+                }
+            }
             return false;
         }
 
@@ -2036,11 +2177,13 @@ import { createMobileInputController } from './mobile-runtime.js';
             if (!me || !me.alive || me.hp <= 0) return;
             const dx = event.movementX ?? 0;
             if (Math.abs(dx) > 0) {
+                const scopeMult = me.scoping ? SCOPE_TURN_MULT : 1;
+                const sens = TURRET_SENSITIVITY_LEVELS[localTurretSensitivityLevel] * MOUSE_TURRET_SENSITIVITY * scopeMult;
                 if (localTurretLocked) {
-                    me.mesh.rotation.y -= dx * MOUSE_TURRET_SENSITIVITY;
+                    me.mesh.rotation.y -= dx * sens;
                     me.viewYaw = me.mesh.rotation.y;
                 } else {
-                    me.turretYaw -= dx * MOUSE_TURRET_SENSITIVITY;
+                    me.turretYaw -= dx * sens;
                     if (me.turretMesh) me.turretMesh.rotation.y = me.turretYaw;
                 }
             }
@@ -2365,8 +2508,9 @@ import { createMobileInputController } from './mobile-runtime.js';
         function resolveExtraObstacleCollisions(playerKey) {
             const player = players[playerKey];
             const now = Date.now();
-            // 池塘只做阻挡不做碰撞伤害；建筑物阻挡且可造成碰撞伤害（按开关）
-            for (const obj of ponds) {
+            // 火山地图：岩浆可进入，不做阻挡；其他地图池塘阻挡
+            if (currentMapId !== 'volcano') {
+                for (const obj of ponds) {
                 const dx = player.mesh.position.x - obj.position.x;
                 const dz = player.mesh.position.z - obj.position.z;
                 let distXZ = Math.hypot(dx, dz);
@@ -2385,6 +2529,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                     player.mesh.position.z += normalZ * overlap;
                     keepTankInBounds(player);
                 }
+            }
             }
 
             for (const obj of buildings) {
@@ -2504,6 +2649,8 @@ import { createMobileInputController } from './mobile-runtime.js';
                     box.active = true;
                 }
             }
+            // 武器箱拾取与解锁以主机为准，避免各端重复判定造成不同步
+            if (!isHostRole()) return;
             for (const box of weaponBoxes) {
                 if (!box.active) continue;
                 for (const playerKey of PLAYER_KEYS) {
@@ -2524,12 +2671,12 @@ import { createMobileInputController } from './mobile-runtime.js';
                                     playSfx('pickupSatellite', { volume: 0.85, cooldownMs: 150 });
                                     showWeaponSwitchToast(`解锁：${WEAPONS[weapon].name}`);
                                 }
+                                box.active = false;
+                                box.mesh.visible = false;
+                                box.respawnTime = now + WEAPON_BOX_RESPAWN;
+                                break;
                             }
                         }
-                        box.active = false;
-                        box.mesh.visible = false;
-                        box.respawnTime = now + WEAPON_BOX_RESPAWN;
-                        break;
                     }
                 }
             }
@@ -2669,6 +2816,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                 const prevZ = bullet.mesh.position.z;
                 bullet.mesh.position.addScaledVector(bullet.dir, bullet.speed * deltaSeconds);
                 if (checkBulletObstacleCollision(bullet, i)) continue;
+                if (checkBulletShieldCollision(bullet, i, prevX, prevZ)) continue;
 
                 // 球状闪电：缓慢移动、范围伤害、连接电弧
                 if (bullet.isBallLightning) {
@@ -2711,7 +2859,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                         scene.add(bullet.connectionLines);
                     }
                     const arr = bullet.connectionLines.geometry.attributes.position.array;
-                    const bx = bullet.mesh.position.x, by = bullet.mesh.position.y + 1.2, bz = bullet.mesh.position.z;
+                    const bx = bullet.mesh.position.x, by = bullet.mesh.position.y, bz = bullet.mesh.position.z;
                     let count = 0;
                     for (let j = 0; j < Math.min(maxConn, inRange.length); j++) {
                         const p = players[inRange[j]];
@@ -2768,46 +2916,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                         if (key === bullet.insideTarget) continue; // 穿甲弹已在体内，跳过避免重复判定
                         const target = players[key];
                         if (!target.mesh || !target.alive || target.hp <= 0) continue;
-                        // 护盾：子弹路径与护盾相交则阻挡，护盾有独立血量
-                        if (target.weapon === 'shield' && target.turretMesh && (target.shieldHp ?? SHIELD_MAX_HP) > 0) {
-                            const totalYaw = target.mesh.rotation.y + target.turretYaw;
-                            // 【修改护盾位置】护盾碰撞中心，需与 game-const.js 中 SHIELD_OFFSET_FORWARD、SHIELD_OFFSET_Y 保持一致
-                            const shieldCenterX = target.mesh.position.x + SHIELD_OFFSET_FORWARD * Math.sin(totalYaw);
-                            const shieldCenterZ = target.mesh.position.z - SHIELD_OFFSET_FORWARD * Math.cos(totalYaw);
-                            const distToShield = pointToSegmentDistance2D(
-                                shieldCenterX, shieldCenterZ,
-                                prevX, prevZ,
-                                bullet.mesh.position.x, bullet.mesh.position.z
-                            );
-                            const effectiveRadius = SHIELD_RADIUS + (bullet.radius || 0) + SHIELD_HIT_MARGIN;
-                            if (distToShield < effectiveRadius) {
-                                let dmg = bullet.dmg;
-                                if (bullet.weapon === 'shotgun' && bullet.origin) {
-                                    const odx = bullet.mesh.position.x - bullet.origin.x;
-                                    const odz = bullet.mesh.position.z - bullet.origin.z;
-                                    const travelDist = Math.hypot(odx, odz);
-                                    const maxEffectiveDist = 60;
-                                    const factor = Math.max(0.5, 1 - travelDist / maxEffectiveDist);
-                                    dmg *= factor;
-                                }
-                                const curShield = target.shieldHp ?? SHIELD_MAX_HP;
-                                const newShieldHp = Math.max(0, curShield - dmg);
-                                target.shieldHp = newShieldHp;
-                                target.shieldHitT = 4;
-                                const shieldPos = new THREE.Vector3(shieldCenterX, target.mesh.position.y + SHIELD_OFFSET_Y, shieldCenterZ);
-                                playPositionalSfx(newShieldHp <= 0 ? 'shieldBreak' : 'shieldHit', shieldPos, { minDist: 4, maxDist: 52, baseVolume: 0.95, cooldownMs: 100 });
-                                socket.emit('shield_hit', { targetRole: key, shieldHp: newShieldHp });
-                                if (newShieldHp <= 0) {
-                                    target.weapon = 'mg';
-                                    socket.emit('weapon_switch', { role: key, weapon: 'mg' });
-                                    updatePlayerHud(key);
-                                }
-                                disposeBullet(bullet);
-                                bullets.splice(i, 1);
-                                hit = true;
-                                break;
-                            }
-                        }
+                        // 护盾已在 checkBulletShieldCollision 中优先判定并阻挡
                         const sweepDist = pointToSegmentDistance2D(
                             target.mesh.position.x,
                             target.mesh.position.z,
@@ -2876,25 +2985,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                         if (key === bullet.insideTarget) continue; // 穿甲弹已在体内，跳过
                         const target = players[key];
                         if (!target.mesh || !target.alive || target.hp <= 0) continue;
-                        // 护盾：子弹路径与护盾相交则阻挡（非主机仅做视觉销毁）
-                        if (target.weapon === 'shield' && target.turretMesh && (target.shieldHp ?? SHIELD_MAX_HP) > 0) {
-                            const totalYaw = target.mesh.rotation.y + target.turretYaw;
-                            // 【修改护盾位置】护盾碰撞中心，需与 game-const.js 中 SHIELD_OFFSET_FORWARD、SHIELD_OFFSET_Y 保持一致
-                            const shieldCenterX = target.mesh.position.x + SHIELD_OFFSET_FORWARD * Math.sin(totalYaw);
-                            const shieldCenterZ = target.mesh.position.z - SHIELD_OFFSET_FORWARD * Math.cos(totalYaw);
-                            const distToShield = pointToSegmentDistance2D(
-                                shieldCenterX, shieldCenterZ,
-                                prevX, prevZ,
-                                bullet.mesh.position.x, bullet.mesh.position.z
-                            );
-                            const effectiveRadius = SHIELD_RADIUS + (bullet.radius || 0) + SHIELD_HIT_MARGIN;
-                            if (distToShield < effectiveRadius) {
-                                disposeBullet(bullet);
-                                bullets.splice(i, 1);
-                                hit = true;
-                                break;
-                            }
-                        }
+                        // 护盾已在 checkBulletShieldCollision 中优先判定并阻挡
                         const sweepDist = pointToSegmentDistance2D(
                             target.mesh.position.x,
                             target.mesh.position.z,
@@ -3065,6 +3156,57 @@ import { createMobileInputController } from './mobile-runtime.js';
             }
         }
 
+        function updateLavaDamage(deltaSeconds) {
+            if (!deltaSeconds || currentMapId !== 'volcano') return;
+            for (const key of PLAYER_KEYS) {
+                const player = players[key];
+                if (!player?.alive || player.hp <= 0) continue;
+                if (!isPlayerInLava(key)) continue;
+                if (!isLocalRole(key)) continue;
+                const dmg = LAVA_DAMAGE_PER_SEC * deltaSeconds;
+                applyDamage(key, dmg);
+            }
+        }
+
+        function updateBurnVisual() {
+            if (currentMapId !== 'volcano' || !LAVA_BURN_COLOR) return;
+            const burnColor = LAVA_BURN_COLOR;
+            for (const key of PLAYER_KEYS) {
+                const player = players[key];
+                if (!player.mesh) continue;
+                const burning = isPlayerInLava(key);
+                player.mesh.traverse(obj => {
+                    if (!obj.material) return;
+                    const mat = obj.material;
+                    if (burning) {
+                        if (mat.userData.burnOriginalColor === undefined) {
+                            mat.userData.burnOriginalColor = mat.color.getHex();
+                            if (mat.emissive) {
+                                mat.userData.burnOriginalEmissive = mat.emissive.getHex();
+                                mat.userData.burnOriginalEmissiveIntensity = mat.emissiveIntensity;
+                            }
+                        }
+                        mat.color.setHex(burnColor);
+                        if (mat.emissive) {
+                            mat.emissive.setHex(burnColor);
+                            mat.emissiveIntensity = 0.25;
+                        }
+                    } else {
+                        if (mat.userData.burnOriginalColor !== undefined) {
+                            mat.color.setHex(mat.userData.burnOriginalColor);
+                            delete mat.userData.burnOriginalColor;
+                        }
+                        if (mat.userData.burnOriginalEmissive !== undefined && mat.emissive) {
+                            mat.emissive.setHex(mat.userData.burnOriginalEmissive);
+                            mat.emissiveIntensity = mat.userData.burnOriginalEmissiveIntensity ?? 0;
+                            delete mat.userData.burnOriginalEmissive;
+                            delete mat.userData.burnOriginalEmissiveIntensity;
+                        }
+                    }
+                });
+            }
+        }
+
         function updateBlindOverlay(nowMs, cam) {
             if (!blindOverlayCanvas || !blindOverlayCtx) return;
             const me = players[myRole];
@@ -3208,15 +3350,22 @@ import { createMobileInputController } from './mobile-runtime.js';
             // 死亡或眩晕时禁止位移与攻击；眩晕由电磁炮命中造成 0.1 秒无法移动和开火
             const stunned = player.stunEndTime && Date.now() < player.stunEndTime;
             const canMove = player.alive && player.hp > 0 && !stunned;
-            const turretTurnSpeed = 3.5 * (localTurretLocked && isTouchDevice ? 0.5 : 1) * localTurretSensitivity * deltaSeconds; // 炮台转速（锁定模式下控制车身时手机端降速）
+            const localTurretSensitivity = TURRET_SENSITIVITY_LEVELS[localTurretSensitivityLevel];
+            const scopeTurnMult = player.scoping ? SCOPE_TURN_MULT : 1; // 瞄准镜时炮台/车身转向同步减速
+            const turretTurnSpeed = 3.5 * (localTurretLocked && isTouchDevice ? 0.5 : 1) * localTurretSensitivity * scopeTurnMult * deltaSeconds; // 炮台转速（锁定模式下控制车身时手机端降速）
 
-            // 上下键调整炮台灵敏度（仅本机生效）
-            const sensStep = 0.8 * deltaSeconds;
-            if (keys[keyBindings[playerKey].turretSensitivityUp]) {
-                localTurretSensitivity = Math.min(2.0, localTurretSensitivity + sensStep);
+            // 上下键调整炮台灵敏度（仅本机生效，5 档，切换时提示）
+            if (isKeyJustPressed(keyBindings[playerKey].turretSensitivityUp)) {
+                if (localTurretSensitivityLevel < TURRET_SENSITIVITY_LEVELS.length - 1) {
+                    localTurretSensitivityLevel++;
+                    showWeaponSwitchToast(`炮台灵敏度：${TURRET_SENSITIVITY_LABELS[localTurretSensitivityLevel]}`);
+                }
             }
-            if (keys[keyBindings[playerKey].turretSensitivityDown]) {
-                localTurretSensitivity = Math.max(0.5, localTurretSensitivity - sensStep);
+            if (isKeyJustPressed(keyBindings[playerKey].turretSensitivityDown)) {
+                if (localTurretSensitivityLevel > 0) {
+                    localTurretSensitivityLevel--;
+                    showWeaponSwitchToast(`炮台灵敏度：${TURRET_SENSITIVITY_LABELS[localTurretSensitivityLevel]}`);
+                }
             }
 
             if (canMove) {
@@ -3521,22 +3670,24 @@ import { createMobileInputController } from './mobile-runtime.js';
                 minimapCtx.fill();
             }
 
-            minimapCtx.fillStyle = '#878787';
-            for (const rock of obstacles) {
+            for (const obj of obstacles) {
+                minimapCtx.fillStyle = obj.userData.isTree ? '#2d5a27' : '#878787';
+                const r = obj.userData.isTree ? Math.max(2, (obj.userData.collisionRadius / MAP_HALF) * MINIMAP_RADIUS * 0.5) : 3;
                 minimapCtx.beginPath();
                 minimapCtx.arc(
-                    centerX + (rock.position.x / MAP_HALF) * MINIMAP_RADIUS,
-                    centerY + (rock.position.z / MAP_HALF) * MINIMAP_RADIUS,
-                    3,
+                    centerX + (obj.position.x / MAP_HALF) * MINIMAP_RADIUS,
+                    centerY + (obj.position.z / MAP_HALF) * MINIMAP_RADIUS,
+                    r,
                     0,
                     Math.PI * 2
                 );
                 minimapCtx.fill();
             }
 
-            // 池塘
+            // 池塘（火山地图为岩浆，显示橙红色）
+            const pondColor = currentMapId === 'volcano' ? 'rgba(255, 68, 0, 0.85)' : 'rgba(60, 140, 255, 0.85)';
             for (const pond of ponds) {
-                minimapCtx.fillStyle = 'rgba(60, 140, 255, 0.85)';
+                minimapCtx.fillStyle = pondColor;
                 minimapCtx.beginPath();
                 minimapCtx.arc(
                     centerX + (pond.position.x / MAP_HALF) * MINIMAP_RADIUS,
@@ -3734,6 +3885,26 @@ import { createMobileInputController } from './mobile-runtime.js';
                         showWeaponSwitchToast(`解锁：${WEAPONS[data.weapon].name}`);
                     }
                     updatePlayerHud(role);
+                    // 非主机：收到解锁广播后，消耗离该玩家最近的武器箱以保持同步
+                    if (!isHostRole() && players[role].mesh) {
+                        const px = players[role].mesh.position.x;
+                        const pz = players[role].mesh.position.z;
+                        let nearest = null;
+                        let nearestDist = 5;
+                        for (const box of weaponBoxes) {
+                            if (!box.active) continue;
+                            const d = Math.hypot(box.mesh.position.x - px, box.mesh.position.z - pz);
+                            if (d < nearestDist) {
+                                nearestDist = d;
+                                nearest = box;
+                            }
+                        }
+                        if (nearest) {
+                            nearest.active = false;
+                            nearest.mesh.visible = false;
+                            nearest.respawnTime = Date.now() + WEAPON_BOX_RESPAWN;
+                        }
+                    }
                 };
                 socket.on('weapon_unlock', weaponUnlockHandler);
             }
@@ -3871,6 +4042,7 @@ import { createMobileInputController } from './mobile-runtime.js';
             poisonCircleEnabled = !!config.poisonCircleEnabled;
             bulletSpreadEnabled = !!config.bulletSpreadEnabled;
             const mapId = (config.mapId && MAP_IDS.includes(config.mapId)) ? config.mapId : 'grassland';
+            currentMapId = mapId;
             const mapTheme = MAP_THEMES[mapId];
             SKY_BG_COLOR.setHex(mapTheme.sky);
             scene.background = SKY_BG_COLOR;
@@ -3944,8 +4116,7 @@ import { createMobileInputController } from './mobile-runtime.js';
             spawnRocks(mapTheme);
             spawnPonds(mapTheme);
             spawnBuildings(typeof config.buildingCount === 'number' ? config.buildingCount : null, mapTheme);
-
-
+            spawnTrees(mapTheme);
 
             const rolesToSpawn = (activeRoles && activeRoles.length > 0)
                 ? activeRoles.filter(r => PLAYER_KEYS.includes(r))
@@ -4075,7 +4246,7 @@ import { createMobileInputController } from './mobile-runtime.js';
         document.getElementById('open-keybind').addEventListener('click', () => {
             document.getElementById('keybind-modal').classList.add('open');
         });
-        document.querySelector('.keybind-close-btn').addEventListener('click', () => {
+        document.querySelector('#keybind-modal .keybind-close-btn').addEventListener('click', () => {
             document.getElementById('keybind-modal').classList.remove('open');
             rebindingTarget = null;
         });
@@ -4089,29 +4260,20 @@ import { createMobileInputController } from './mobile-runtime.js';
         });
 
         // Settings modal open/close
+        function syncConfigFromSettings() {
+            if (myRole !== 'p1') return;
+            currentConfig = readConfigFromUi();
+            if (localReady) {
+                socket.emit('host_ready', { role: 'p1', config: currentConfig });
+            }
+        }
         document.getElementById('open-settings').addEventListener('click', () => {
             document.getElementById('settings-modal').classList.add('open');
-            for (const role of PLAYER_KEYS) {
-                const input = document.getElementById(`name-${role}`);
-                if (input) input.value = customTankNames[role] || '';
-            }
         });
-        function applyTankNamesFromSettings() {
-            for (const role of PLAYER_KEYS) {
-                const input = document.getElementById(`name-${role}`);
-                if (input) {
-                    const v = input.value.trim();
-                    if (v) customTankNames[role] = v;
-                    else delete customTankNames[role];
-                }
-            }
-            saveTankNames();
-            updateTankNameDisplays();
-            updateScoreboardUI();
-            updatePlayerStatusUI();
-        }
-        document.getElementById('close-settings').addEventListener('click', () => {
-            applyTankNamesFromSettings();
+        document.getElementById('close-settings').addEventListener('click', (e) => {
+            e.stopPropagation();
+            document.activeElement?.blur?.(); // 确保 select 等控件先提交值
+            syncConfigFromSettings();
             document.getElementById('settings-modal').classList.remove('open');
         });
 
@@ -4133,7 +4295,7 @@ import { createMobileInputController } from './mobile-runtime.js';
         });
         document.getElementById('settings-modal').addEventListener('click', (e) => {
             if (e.target === e.currentTarget) {
-                applyTankNamesFromSettings();
+                syncConfigFromSettings();
                 document.getElementById('settings-modal').classList.remove('open');
             }
         });
@@ -4192,12 +4354,14 @@ import { createMobileInputController } from './mobile-runtime.js';
             updatePoison(tickNow, deltaSeconds);
             updateBullets(deltaSeconds);
             updatePoisonDamage(deltaSeconds);
+            updateLavaDamage(deltaSeconds);
             updateHitFlash();
             updateShieldRegen(deltaSeconds);
             updateShieldVisibility();
             updateShieldHpUI();
             updateStunVisual();
             updatePoisonVisual();
+            updateBurnVisual();
             updateBlindWorldVisibility(tickNow);
             updateBlindAudioLoop();
             updateExplosions(now);
