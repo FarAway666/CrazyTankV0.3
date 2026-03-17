@@ -5,6 +5,20 @@ body {
     font-family: 'Microsoft YaHei', sans-serif;
 }
 
+/* 桌面端只缩放主要 UI，避免缩放 modal/select 造成卡死 */
+body.desktop-ui-scale #setup-ui,
+body.desktop-ui-scale #ui,
+body.desktop-ui-scale #control-guide,
+body.desktop-ui-scale #scoreboard,
+body.desktop-ui-scale #player-status,
+body.desktop-ui-scale #weapon-switch-toast,
+body.desktop-ui-scale #winner-msg,
+body.desktop-ui-scale #settings-modal,
+body.desktop-ui-scale #role-assign-modal {
+    zoom: 150%;
+}
+
+
 html.touch-device,
 body.touch-device {
     user-select: none;
@@ -238,6 +252,73 @@ html.touch-device textarea {
     font-size: 13px;
     line-height: 1.6;
     text-align: center;
+}
+
+.settings-map-card {
+    margin-top: 14px;
+    padding: 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(0, 242, 255, 0.2);
+    background: linear-gradient(180deg, rgba(0, 242, 255, 0.08), rgba(255, 255, 255, 0.04));
+}
+
+.settings-map-title {
+    margin: 0 0 10px;
+    color: #bfefff;
+    font-size: 13px;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+}
+
+.settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.settings-row + .settings-row {
+    margin-top: 10px;
+}
+
+.settings-label {
+    color: #e0e8ff;
+    font-size: 13px;
+}
+
+.settings-select,
+.settings-number {
+    pointer-events: auto;
+    height: 34px;
+    border-radius: 9px;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.16s, box-shadow 0.16s, background 0.16s;
+}
+
+.settings-select {
+    min-width: 130px;
+    padding: 0 10px;
+}
+
+.settings-number {
+    width: 84px;
+    padding: 0 10px;
+}
+
+.settings-select:hover,
+.settings-number:hover {
+    border-color: rgba(0, 242, 255, 0.45);
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.settings-select:focus,
+.settings-number:focus {
+    border-color: rgba(0, 242, 255, 0.85);
+    box-shadow: 0 0 0 2px rgba(0, 242, 255, 0.2);
 }
 
 .keybind-close-btn {
@@ -519,15 +600,17 @@ button {
 
 #poison-timer {
     position: absolute;
-    top: 24px;
-    left: 50%;
-    transform: translateX(-50%);
-    padding: 10px 18px;
+    left: 18px;
+    bottom: 214px;
+    right: auto;
+    top: auto;
+    transform: none;
+    padding: 6px 12px;
     border-radius: 999px;
     background: rgba(68, 0, 100, 0.45);
     color: white;
     border: 1px solid rgba(255, 255, 255, 0.18);
-    font-size: 18px;
+    font-size: 13px;
     display: none;
 }
 
@@ -665,6 +748,8 @@ button {
     display: none;
     grid-template-columns: 1fr 1fr;
     gap: 16px;
+    transform: scale(0.85);
+    transform-origin: bottom right;
 }
 
 .guide-column h3 {
@@ -976,11 +1061,12 @@ body.touch-device .hud-other-3 .weapon-tag {
 
 /* 毒圈计时器移至右上，避免与血条重叠 */
 body.touch-device #poison-timer {
-    top: 12px;
-    right: 12px;
-    left: auto;
+    bottom: 190px;
+    left: 12px;
+    right: auto;
+    top: auto;
     transform: none;
-    font-size: 14px;
+    font-size: 12px;
     padding: 6px 12px;
 }
 

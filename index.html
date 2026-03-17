@@ -12,7 +12,7 @@
 <body>
     <div id="setup-ui">
         <div class="setup-card">
-            <h1>BATTLE TANK</h1>
+            <h1>CRAZY TANK</h1>
             <p class="setup-desc">2–4 人联机坦克对决。先点击“准备”，待所有玩家均准备后，由主机点击“开始游戏”开局。</p>
             <div class="toggle-list">
                 <div class="toggle-item">
@@ -52,21 +52,24 @@
                     <button id="satellite-laser" class="toggle-btn active" type="button">卫星激光炮</button>
                 </div>
                 <div class="toggle-item">
-                    <button id="unlock-all-weapons" class="toggle-btn" type="button">解锁全部武器</button>
+                    <button id="unlock-all-weapons" class="toggle-btn active" type="button">解锁全部武器</button>
                 </div>
             </div>
-            <div style="margin-top:14px;color:#e0e8ff;font-size:13px;">
-                地图：
-                <select id="map-select" style="margin-left:8px;padding:6px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:white;pointer-events:auto;">
-                    <option value="grassland">草原</option>
-                    <option value="desert">沙漠</option>
-                    <option value="jungle">丛林</option>
-                    <option value="volcano">火山</option>
-                </select>
-            </div>
-            <div style="margin-top:10px;color:#e0e8ff;font-size:13px;">
-                建筑物数量：
-                <input id="building-count" type="number" min="0" max="20" value="6" style="width:72px;margin-left:8px;padding:6px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:white;pointer-events:auto;">
+            <div class="settings-map-card">
+                <div class="settings-map-title">地图与场景参数</div>
+                <div class="settings-row">
+                    <label class="settings-label" for="map-select">地图</label>
+                    <select id="map-select" class="settings-select">
+                        <option value="grassland">草原</option>
+                        <option value="desert">沙漠</option>
+                        <option value="jungle">丛林</option>
+                        <option value="volcano">火山</option>
+                    </select>
+                </div>
+                <div class="settings-row">
+                    <label class="settings-label" for="building-count">建筑物数量</label>
+                    <input id="building-count" class="settings-number" type="number" min="0" max="20" value="6">
+                </div>
             </div>
             <button id="close-settings" class="keybind-close-btn" type="button">确定</button>
         </div>

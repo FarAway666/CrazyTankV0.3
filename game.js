@@ -164,6 +164,10 @@ import { createMobileInputController } from './mobile-runtime.js';
             const minPoisonMs = WEAPONS.toxic.dotDurationPerHit ?? 2000;
             p.poisonEndTime = Math.max(Number(data.poisonEndAt) || 0, now + minPoisonMs);
         });
+        socket.on('poison_state_sync', (data) => {
+            if (!data || isHostRole()) return;
+            applyPoisonSync(data);
+        });
 
         let keyBindings = {
             p1: { ...DEFAULT_KEYS },
@@ -187,6 +191,9 @@ import { createMobileInputController } from './mobile-runtime.js';
         if (isTouchDevice) {
             document.body.classList.add('touch-device');
             document.documentElement.classList.add('touch-device');
+        } else {
+            // 仅缩放 UI，不影响 Three.js 渲染画布
+            document.body.classList.add('desktop-ui-scale');
         }
         let lastMinimapDrawAt = 0;
 
@@ -233,7 +240,9 @@ import { createMobileInputController } from './mobile-runtime.js';
             shieldBreak: '护盾被击破.mp3',
             shieldSwitch: '切换至护盾.mp3',
             balllightningFire: '球状闪电.mp3',
-            balllightningHit: '被球状闪电击中.mp3'
+            balllightningHit: '被球状闪电击中.mp3',
+            ghostFire: '幽灵炮发射.mp3',
+            ghostNear: '幽灵炮距离自己很近.mp3'
         };
         const sfxPool = {};
         const sfxLastPlayAt = {};
@@ -611,6 +620,7 @@ import { createMobileInputController } from './mobile-runtime.js';
         const healthPacks = [];
         const weaponBoxes = [];
         const grassPatches = [];
+        const terrainDecors = [];
         let gameStarted = false;
         let collisionDamageEnabled = false;
         let poisonCircleEnabled = false;
@@ -619,9 +629,36 @@ import { createMobileInputController } from './mobile-runtime.js';
         let satelliteLaserEnabled = false;
         let unlockAllWeapons = false;
         let poisonCircle = null;
+        let poisonPreviewCircle = null;
         let satellitePickup = null;
         let poisonStartTime = 0;
+        let poisonMaxRadius = MAX_RADIUS;
+        let poisonStageTargetRadii = [MAX_RADIUS * 0.66, MAX_RADIUS * 0.33, 0];
         let safeRadius = MAX_RADIUS;
+        let poisonCenterX = 0;
+        let poisonCenterZ = 0;
+        let poisonPreviewCenterX = 0;
+        let poisonPreviewCenterZ = 0;
+        let poisonPreviewRadius = 0;
+        let poisonPreviewActive = false;
+        let poisonStageIndex = 0;
+        let poisonPhase = 'idle'; // idle | warmup | preview | shrink | hold | closed
+        let poisonPhaseStartTime = 0;
+        let poisonPhaseDurationMs = 0;
+        let poisonShrinkFromRadius = MAX_RADIUS;
+        let poisonShrinkFromCenterX = 0;
+        let poisonShrinkFromCenterZ = 0;
+        let poisonShrinkToRadius = MAX_RADIUS;
+        let poisonShrinkToCenterX = 0;
+        let poisonShrinkToCenterZ = 0;
+        let poisonRemoteRemainMs = 0;
+        let poisonRemoteSyncAt = 0;
+        let poisonLastSyncAt = 0;
+        const POISON_SYNC_INTERVAL_MS = 120;
+        const POISON_WARMUP_SECONDS = 60;
+        const POISON_PREVIEW_SECONDS = 10;
+        const POISON_SHRINK_SECONDS = 12;
+        const POISON_HOLD_SECONDS = 30;
         let lastFrameTime = performance.now();
         let lastNetUpdateTime = 0;
         let rebindingTarget = null;
@@ -634,6 +671,7 @@ import { createMobileInputController } from './mobile-runtime.js';
         let remoteReady = false;
         let currentConfig = null;
         let currentMapId = 'grassland';
+        let currentMapHalf = MAP_HALF;
         let blindWorldApplied = false;
         let spectateTargetRole = null;
         let enemyPosHandler = null;
@@ -830,7 +868,7 @@ import { createMobileInputController } from './mobile-runtime.js';
 
         function renderKeybindUI() {
             const grid = document.getElementById('keybind-grid');
-            const rows = ['forward', 'backward', 'left', 'right', 'turretLeft', 'turretRight', 'turretSensitivityUp', 'turretSensitivityDown', 'turretLock', 'fire', 'weaponSwitch', 'weapon1', 'weapon2', 'weapon3', 'weapon4', 'weapon5', 'weapon6', 'weapon7', 'weapon8', 'weapon9', 'scope', 'mine'];
+            const rows = ['forward', 'backward', 'left', 'right', 'turretLeft', 'turretRight', 'turretSensitivityUp', 'turretSensitivityDown', 'turretLock', 'fire', 'weaponSwitch', 'weapon1', 'weapon2', 'weapon3', 'weapon4', 'weapon5', 'weapon6', 'weapon7', 'weapon8', 'weapon9', 'weapon10', 'scope', 'mine'];
             grid.innerHTML = '';
 
             const headAction = document.createElement('div');
@@ -878,7 +916,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                     <p>${getReadableKeyName(keyBindings.p1.turretLock)} - 炮台锁定车身（仅自己）</p>
                     <p>${getReadableKeyName(keyBindings.p1.fire)} 或 鼠标左键 - 开火</p>
                     <p>${getReadableKeyName(keyBindings.p1.weaponSwitch)} 或 滚轮 - 循环切换武器</p>
-                    <p>1-9 - 直接切换武器（机枪/狙击/霰弹/冰冻/剧毒/致盲/护盾/穿甲炮/球状闪电）</p>
+                    <p>1-0 - 直接切换武器（机枪/狙击/霰弹/冰冻/剧毒/致盲/护盾/穿甲炮/球状闪电/幽灵炮）</p>
                     <p>${getReadableKeyName(keyBindings.p1.scope)} 或 鼠标右键 - 开关瞄准镜</p>
                     <p>${getReadableKeyName(keyBindings.p1.mine)} - 放置地雷</p>
                     <p>双击方向键 - 加速移动</p>
@@ -911,7 +949,19 @@ import { createMobileInputController } from './mobile-runtime.js';
         }
 
         function clampToMap(value) {
-            return THREE.MathUtils.clamp(value, -MAP_HALF, MAP_HALF);
+            return THREE.MathUtils.clamp(value, -currentMapHalf, currentMapHalf);
+        }
+
+        function getMapScale(mapId) {
+            if (mapId === 'desert') return 2.2;
+            if (mapId === 'volcano') return 1.6;
+            return 1;
+        }
+
+        function getSatelliteTargetLimit() {
+            if (currentMapId === 'desert') return currentMapHalf * 0.95; // 沙漠大场景下提高轨道炮目标移动范围
+            if (currentMapId === 'volcano') return currentMapHalf * 0.72; // 火山口内收，避免落点越过火山壁
+            return currentMapHalf;
         }
 
         function shouldPreventDefaultForCode(code) {
@@ -1108,7 +1158,7 @@ import { createMobileInputController } from './mobile-runtime.js';
 
         function createRock(geometry, material) {
             const rock = new THREE.Mesh(geometry, material);
-            rock.position.set((rand() - 0.5) * (MAP_HALF * 1.5), 1.2, (rand() - 0.5) * (MAP_HALF * 1.5));
+            rock.position.set((rand() - 0.5) * (currentMapHalf * 1.5), 1.2, (rand() - 0.5) * (currentMapHalf * 1.5));
             rock.rotation.set(rand(), rand(), rand());
             rock.scale.set(1 + rand(), 0.5 + rand(), 1 + rand());
             rock.castShadow = true;
@@ -1187,6 +1237,14 @@ import { createMobileInputController } from './mobile-runtime.js';
         }
 
         function spawnPonds(theme) {
+            if (currentMapId === 'desert') return;
+            if (currentMapId === 'volcano') {
+                const centralLava = createPond(52, theme);
+                placeOnTerrain(centralLava, 0, 0, 0);
+                scene.add(centralLava);
+                ponds.push(centralLava);
+                return;
+            }
             const targetCount = 2 + Math.floor(rand() * 2); // 2~3 个池塘
             let created = 0;
             let attempts = 0;
@@ -1194,14 +1252,14 @@ import { createMobileInputController } from './mobile-runtime.js';
                 attempts++;
                 const radius = 10 + rand() * 8; // 10~18
                 const pos = randomGroundPosition(35);
-                if (Math.abs(pos.x) > MAP_HALF * 0.82 || Math.abs(pos.z) > MAP_HALF * 0.82) continue;
+                if (Math.abs(pos.x) > currentMapHalf * 0.82 || Math.abs(pos.z) > currentMapHalf * 0.82) continue;
                 if (Math.hypot(pos.x, pos.z) < 40) continue;
                 if (isTooCloseToExistingRock(pos.x, pos.z, radius + 8)) continue;
                 if (isTooCloseToExistingPond(pos.x, pos.z, radius + 18)) continue;
                 if (grassPatches.some(patch => Math.hypot(pos.x - patch.position.x, pos.z - patch.position.z) < patch.radius + radius + 6)) continue;
 
                 const pond = createPond(radius, theme);
-                pond.position.set(pos.x, 0, pos.z);
+                placeOnTerrain(pond, pos.x, pos.z, 0);
                 scene.add(pond);
                 ponds.push(pond);
                 created++;
@@ -1237,7 +1295,7 @@ import { createMobileInputController } from './mobile-runtime.js';
         function spawnBuildings(countOverride = null, theme) {
             const targetCount = (typeof countOverride === 'number')
                 ? Math.max(0, Math.floor(countOverride))
-                : (4 + Math.floor(rand() * 4)); // 4~7
+                : (currentMapId === 'desert' ? (1 + Math.floor(rand() * 2)) : (4 + Math.floor(rand() * 4))); // 沙漠 1~2，其余 4~7
             let created = 0;
             let attempts = 0;
             while (created < targetCount && attempts < 400) {
@@ -1246,7 +1304,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                 const sizeZ = 6 + rand() * 8;
                 const height = 5 + rand() * 6;
                 const pos = randomGroundPosition(28);
-                if (Math.abs(pos.x) > MAP_HALF * 0.86 || Math.abs(pos.z) > MAP_HALF * 0.86) continue;
+                if (Math.abs(pos.x) > currentMapHalf * 0.86 || Math.abs(pos.z) > currentMapHalf * 0.86) continue;
                 if (Math.hypot(pos.x, pos.z) < 32) continue;
                 const radius = Math.max(sizeX, sizeZ) * 0.55;
                 if (isTooCloseToExistingRock(pos.x, pos.z, radius + 8)) continue;
@@ -1254,7 +1312,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                 if (isTooCloseToExistingBuilding(pos.x, pos.z, radius + 10)) continue;
 
                 const b = createBuilding(sizeX, sizeZ, height, theme);
-                b.position.set(pos.x, 0, pos.z);
+                placeOnTerrain(b, pos.x, pos.z, 0);
                 b.rotation.y = rand() * Math.PI * 2;
                 scene.add(b);
                 buildings.push(b);
@@ -1318,31 +1376,130 @@ import { createMobileInputController } from './mobile-runtime.js';
                 attempts++;
                 const scale = 1 + rand() * 4.15;
                 const pos = randomGroundPosition(28);
-                if (Math.abs(pos.x) > MAP_HALF * 0.88 || Math.abs(pos.z) > MAP_HALF * 0.88) continue;
+                if (Math.abs(pos.x) > currentMapHalf * 0.88 || Math.abs(pos.z) > currentMapHalf * 0.88) continue;
                 if (Math.hypot(pos.x, pos.z) < 30) continue;
                 const collisionRadius = 0.4 * scale * 1.3;
                 if (isTooCloseToExistingRock(pos.x, pos.z, collisionRadius + 5)) continue;
                 if (isTooCloseToExistingPond(pos.x, pos.z, collisionRadius + 8)) continue;
                 if (isTooCloseToExistingBuilding(pos.x, pos.z, collisionRadius + 6)) continue;
                 const tree = createTree(scale, pos.x, pos.z, theme);
+                placeOnTerrain(tree, pos.x, pos.z, 0);
                 scene.add(tree);
                 obstacles.push(tree);
                 created++;
             }
         }
 
+        function clearTerrainDecors() {
+            while (terrainDecors.length) {
+                const m = terrainDecors.pop();
+                if (!m) continue;
+                scene.remove(m);
+                m.traverse(obj => {
+                    if (obj.geometry) obj.geometry.dispose();
+                    if (obj.material) obj.material.dispose();
+                });
+            }
+        }
+
+        function createCactus(scale, x, z) {
+            const group = new THREE.Group();
+            const mainMat = new THREE.MeshStandardMaterial({ color: 0x4f7f3a, roughness: 0.9, metalness: 0 });
+            const main = new THREE.Mesh(new THREE.CylinderGeometry(0.45 * scale, 0.55 * scale, 5.6 * scale, 10), mainMat);
+            main.position.y = 2.8 * scale;
+            group.add(main);
+            const armL = new THREE.Mesh(new THREE.CylinderGeometry(0.22 * scale, 0.26 * scale, 2.2 * scale, 10), mainMat);
+            armL.position.set(-0.7 * scale, 2.8 * scale, 0);
+            armL.rotation.z = Math.PI / 2.9;
+            group.add(armL);
+            const armR = new THREE.Mesh(new THREE.CylinderGeometry(0.2 * scale, 0.24 * scale, 1.8 * scale, 10), mainMat);
+            armR.position.set(0.75 * scale, 2.3 * scale, 0);
+            armR.rotation.z = -Math.PI / 2.7;
+            group.add(armR);
+            group.position.set(x, 0, z);
+            group.rotation.y = rand() * Math.PI * 2;
+            group.traverse(obj => { obj.castShadow = true; obj.receiveShadow = true; });
+            group.userData.isObstacle = true;
+            group.userData.isCactus = true;
+            group.userData.collisionRadius = 0.7 * scale;
+            return group;
+        }
+
+        function spawnCacti() {
+            if (currentMapId !== 'desert') return;
+            const targetCount = 24 + Math.floor(rand() * 12);
+            let created = 0;
+            let attempts = 0;
+            while (created < targetCount && attempts < 500) {
+                attempts++;
+                const scale = 0.8 + rand() * 1.8;
+                const pos = randomGroundPosition(24);
+                const r = 0.7 * scale;
+                if (isTooCloseToExistingRock(pos.x, pos.z, r + 4)) continue;
+                if (isTooCloseToExistingBuilding(pos.x, pos.z, r + 6)) continue;
+                const c = createCactus(scale, pos.x, pos.z);
+                placeOnTerrain(c, pos.x, pos.z, 0);
+                scene.add(c);
+                obstacles.push(c);
+                created++;
+            }
+        }
+
+        function spawnVolcanoCrater(theme) {
+            if (currentMapId !== 'volcano') return;
+            const rockColor = theme?.rock ?? 0x2a2a2a;
+            const darkRock = new THREE.MeshStandardMaterial({ color: rockColor, roughness: 1, metalness: 0 });
+            const ashRock = new THREE.MeshStandardMaterial({ color: 0x3a2f2f, roughness: 1, metalness: 0 });
+
+            // 盆地底部火山灰层（非环形抬高体，避免穿模）
+            const basinFloor = new THREE.Mesh(
+                new THREE.CircleGeometry(currentMapHalf * 0.55, 72),
+                ashRock
+            );
+            basinFloor.rotation.x = -Math.PI / 2;
+            basinFloor.position.y = 0.02;
+            basinFloor.receiveShadow = true;
+            scene.add(basinFloor);
+            terrainDecors.push(basinFloor);
+
+            // 火山口边缘碎石带：不使用完整圆环体，改为离散岩块塑形
+            const chunkCount = 40;
+            for (let i = 0; i < chunkCount; i++) {
+                const angle = (i / chunkCount) * Math.PI * 2 + (rand() - 0.5) * 0.16;
+                const radius = currentMapHalf * (0.78 + rand() * 0.1);
+                const x = Math.cos(angle) * radius;
+                const z = Math.sin(angle) * radius;
+                const h = 3.5 + rand() * 6.5;
+                const sx = 7 + rand() * 8;
+                const sz = 6 + rand() * 9;
+                const chunk = new THREE.Mesh(
+                    new THREE.SphereGeometry(1, 14, 10),
+                    i % 2 === 0 ? darkRock : ashRock
+                );
+                chunk.scale.set(sx, h, sz);
+                chunk.position.set(x, getTerrainHeightAt(x, z) - h * 0.55, z);
+                chunk.rotation.y = rand() * Math.PI * 2;
+                chunk.receiveShadow = true;
+                scene.add(chunk);
+                terrainDecors.push(chunk);
+            }
+        }
+
         function spawnRocks(theme) {
+            if (currentMapId === 'desert') return;
             const t = theme || MAP_THEMES.grassland;
             const rockGeo = new THREE.DodecahedronGeometry(2, 0);
             const rockMat = new THREE.MeshStandardMaterial({ color: t.rock });
             let created = 0;
             let attempts = 0;
-            while (created < 20 && attempts < 200) {
+            const targetCount = currentMapId === 'volcano' ? 10 : 20;
+            while (created < targetCount && attempts < 200) {
                 attempts++;
                 const rock = createRock(rockGeo, rockMat);
                 if (Math.hypot(rock.position.x, rock.position.z) < 25) continue;
-                if (Math.abs(rock.position.x) > MAP_HALF * 0.88 || Math.abs(rock.position.z) > MAP_HALF * 0.88) continue;
+                if (Math.abs(rock.position.x) > currentMapHalf * 0.88 || Math.abs(rock.position.z) > currentMapHalf * 0.88) continue;
                 if (isTooCloseToExistingRock(rock.position.x, rock.position.z, rock.userData.collisionRadius + 4)) continue;
+                rock.position.y = getTerrainHeightAt(rock.position.x, rock.position.z) + 1.2;
                 scene.add(rock);
                 obstacles.push(rock);
                 created++;
@@ -1351,13 +1508,58 @@ import { createMobileInputController } from './mobile-runtime.js';
 
         function randomGroundPosition(minFromCenter = 0) {
             for (let i = 0; i < 400; i++) {
-                const x = (rand() - 0.5) * (MAP_HALF * 1.2);
-                const z = (rand() - 0.5) * (MAP_HALF * 1.2);
+                const x = (rand() - 0.5) * (currentMapHalf * 1.2);
+                const z = (rand() - 0.5) * (currentMapHalf * 1.2);
                 if (Math.hypot(x, z) < minFromCenter) continue;
-                if (Math.abs(x) > MAP_HALF * 0.92 || Math.abs(z) > MAP_HALF * 0.92) continue;
+                if (Math.abs(x) > currentMapHalf * 0.92 || Math.abs(z) > currentMapHalf * 0.92) continue;
                 return { x, z };
             }
             return { x: 0, z: 0 };
+        }
+
+        function getTerrainHeightAt(x, z, mapIdOverride = null) {
+            const mapId = mapIdOverride || currentMapId;
+            if (mapId === 'desert') {
+                const duneA = Math.sin(x * 0.028) + Math.cos(z * 0.031);
+                const duneB = Math.sin((x + z) * 0.017) + Math.cos((x - z) * 0.013);
+                return duneA * 1.8 + duneB * 1.1;
+            }
+            if (mapId === 'volcano') {
+                const r = Math.hypot(x, z);
+                const flatR = 56;
+                const rimR = currentMapHalf * 0.9;
+                if (r <= flatR) return 0;
+                const t = THREE.MathUtils.clamp((r - flatR) / (rimR - flatR), 0, 1);
+                const rise = t * t * 10.5;
+                const ripple = (0.45 + t * 0.35) * Math.sin((x + z) * 0.02);
+                return rise + ripple;
+            }
+            return 0;
+        }
+
+        function placeOnTerrain(obj, x, z, yOffset = 0) {
+            obj.position.set(x, getTerrainHeightAt(x, z) + yOffset, z);
+        }
+
+        function rebuildFloorGeometry(mapId, mapFloorSize) {
+            const useRelief = mapId === 'desert' || mapId === 'volcano';
+            const segments = useRelief ? 220 : 1;
+            const geometry = new THREE.PlaneGeometry(mapFloorSize, mapFloorSize, segments, segments);
+            if (useRelief) {
+                const pos = geometry.attributes.position;
+                for (let i = 0; i < pos.count; i++) {
+                    const localX = pos.getX(i);
+                    const localY = pos.getY(i);
+                    const worldX = localX;
+                    const worldZ = -localY;
+                    const h = getTerrainHeightAt(worldX, worldZ, mapId);
+                    pos.setZ(i, h);
+                }
+                pos.needsUpdate = true;
+                geometry.computeVertexNormals();
+            }
+            if (floor.geometry) floor.geometry.dispose();
+            floor.geometry = geometry;
         }
 
         function findSafeSpawnPosition(options = {}) {
@@ -1390,7 +1592,7 @@ import { createMobileInputController } from './mobile-runtime.js';
         }
 
         function createPoisonCircle() {
-            const geometry = new THREE.RingGeometry(0, MAX_RADIUS, 64);
+            const geometry = new THREE.RingGeometry(0, poisonMaxRadius, 64);
             const material = new THREE.MeshBasicMaterial({
                 color: 0x9900ff,
                 opacity: 0.2,
@@ -1402,13 +1604,158 @@ import { createMobileInputController } from './mobile-runtime.js';
             poisonCircle.position.y = 0.1;
             poisonCircle.rotation.x = -Math.PI / 2;
             scene.add(poisonCircle);
+
+            const previewGeometry = new THREE.RingGeometry(1.2, 2.2, 64);
+            const previewMaterial = new THREE.MeshBasicMaterial({
+                color: 0xffd166,
+                opacity: 0.42,
+                transparent: true,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            poisonPreviewCircle = new THREE.Mesh(previewGeometry, previewMaterial);
+            poisonPreviewCircle.position.y = 0.12;
+            poisonPreviewCircle.rotation.x = -Math.PI / 2;
+            poisonPreviewCircle.visible = false;
+            scene.add(poisonPreviewCircle);
         }
 
         function updatePoisonCircleGeometry(innerRadius) {
             if (!poisonCircle) return;
             const oldGeometry = poisonCircle.geometry;
-            poisonCircle.geometry = new THREE.RingGeometry(innerRadius, MAX_RADIUS, 64);
+            const outerRadius = poisonMaxRadius;
+            poisonCircle.geometry = new THREE.RingGeometry(Math.max(0, innerRadius), outerRadius, 64);
             oldGeometry.dispose();
+        }
+
+        function updatePoisonPreviewCircleGeometry(radius) {
+            if (!poisonPreviewCircle) return;
+            const showRadius = Math.max(1.6, radius);
+            const oldGeometry = poisonPreviewCircle.geometry;
+            poisonPreviewCircle.geometry = new THREE.RingGeometry(Math.max(0.4, showRadius - 0.8), showRadius, 64);
+            oldGeometry.dispose();
+        }
+
+        function randomPointInCircle(centerX, centerZ, radius) {
+            const angle = rand() * Math.PI * 2;
+            const dist = Math.sqrt(rand()) * Math.max(0, radius);
+            return {
+                x: centerX + Math.cos(angle) * dist,
+                z: centerZ + Math.sin(angle) * dist
+            };
+        }
+
+        function refreshPoisonSettingsByMap() {
+            poisonMaxRadius = Math.hypot(currentMapHalf, currentMapHalf);
+            poisonStageTargetRadii = [poisonMaxRadius * 0.66, poisonMaxRadius * 0.33, 0];
+        }
+
+        function chooseNextPoisonCenter(nextRadius) {
+            const maxMove = Math.max(0, safeRadius - nextRadius);
+            if (maxMove <= 0.01) return { x: poisonCenterX, z: poisonCenterZ };
+            const pos = randomPointInCircle(poisonCenterX, poisonCenterZ, maxMove * 0.9);
+            const limit = Math.max(0, currentMapHalf - nextRadius - 3);
+            return {
+                x: THREE.MathUtils.clamp(pos.x, -limit, limit),
+                z: THREE.MathUtils.clamp(pos.z, -limit, limit)
+            };
+        }
+
+        function beginPoisonPreview(now) {
+            if (poisonStageIndex >= poisonStageTargetRadii.length) {
+                poisonPhase = 'closed';
+                poisonPhaseStartTime = now;
+                poisonPhaseDurationMs = 0;
+                poisonPreviewActive = false;
+                if (poisonPreviewCircle) poisonPreviewCircle.visible = false;
+                return;
+            }
+            poisonShrinkToRadius = poisonStageTargetRadii[poisonStageIndex];
+            const nextCenter = chooseNextPoisonCenter(poisonShrinkToRadius);
+            poisonPreviewCenterX = nextCenter.x;
+            poisonPreviewCenterZ = nextCenter.z;
+            poisonPreviewRadius = poisonShrinkToRadius;
+            poisonPreviewActive = true;
+            poisonPhase = 'preview';
+            poisonPhaseStartTime = now;
+            poisonPhaseDurationMs = POISON_PREVIEW_SECONDS * 1000;
+            if (poisonPreviewCircle) {
+                updatePoisonPreviewCircleGeometry(poisonPreviewRadius);
+                poisonPreviewCircle.position.set(poisonPreviewCenterX, 0.12, poisonPreviewCenterZ);
+                poisonPreviewCircle.visible = true;
+            }
+        }
+
+        function beginPoisonShrink(now) {
+            poisonPhase = 'shrink';
+            poisonPhaseStartTime = now;
+            poisonPhaseDurationMs = POISON_SHRINK_SECONDS * 1000;
+            poisonShrinkFromRadius = safeRadius;
+            poisonShrinkFromCenterX = poisonCenterX;
+            poisonShrinkFromCenterZ = poisonCenterZ;
+            poisonShrinkToCenterX = poisonPreviewCenterX;
+            poisonShrinkToCenterZ = poisonPreviewCenterZ;
+            poisonPreviewActive = true;
+            if (poisonPreviewCircle) {
+                poisonPreviewCircle.visible = true;
+                poisonPreviewCircle.position.set(poisonPreviewCenterX, 0.12, poisonPreviewCenterZ);
+            }
+        }
+
+        function initializePoisonSystem(now) {
+            refreshPoisonSettingsByMap();
+            poisonStartTime = now;
+            safeRadius = poisonMaxRadius;
+            poisonCenterX = 0;
+            poisonCenterZ = 0;
+            poisonStageIndex = 0;
+            poisonPhase = 'warmup';
+            poisonPhaseStartTime = now;
+            poisonPhaseDurationMs = POISON_WARMUP_SECONDS * 1000;
+            poisonPreviewActive = false;
+            if (poisonPreviewCircle) poisonPreviewCircle.visible = false;
+            poisonLastSyncAt = 0;
+            poisonRemoteRemainMs = poisonPhaseDurationMs;
+            poisonRemoteSyncAt = now;
+        }
+
+        function buildPoisonSyncPayload(now, phaseRemainMs) {
+            return {
+                poisonStartTime,
+                poisonMaxRadius,
+                poisonStageIndex,
+                poisonPhase,
+                poisonPhaseStartTime,
+                poisonPhaseDurationMs,
+                poisonRemoteRemainMs: Math.max(0, phaseRemainMs),
+                safeRadius,
+                poisonCenterX,
+                poisonCenterZ,
+                poisonPreviewCenterX,
+                poisonPreviewCenterZ,
+                poisonPreviewRadius,
+                poisonPreviewActive,
+                poisonShrinkToRadius
+            };
+        }
+
+        function applyPoisonSync(data) {
+            poisonStartTime = Number(data.poisonStartTime) || poisonStartTime;
+            poisonMaxRadius = Math.max(1, Number(data.poisonMaxRadius) || poisonMaxRadius);
+            poisonStageIndex = Math.max(0, Math.floor(Number(data.poisonStageIndex) || 0));
+            poisonPhase = String(data.poisonPhase || poisonPhase);
+            poisonPhaseStartTime = Number(data.poisonPhaseStartTime) || poisonPhaseStartTime;
+            poisonPhaseDurationMs = Math.max(0, Number(data.poisonPhaseDurationMs) || 0);
+            safeRadius = Math.max(0, Number(data.safeRadius) || safeRadius);
+            poisonCenterX = Number(data.poisonCenterX) || 0;
+            poisonCenterZ = Number(data.poisonCenterZ) || 0;
+            poisonPreviewCenterX = Number(data.poisonPreviewCenterX) || 0;
+            poisonPreviewCenterZ = Number(data.poisonPreviewCenterZ) || 0;
+            poisonPreviewRadius = Math.max(0, Number(data.poisonPreviewRadius) || 0);
+            poisonPreviewActive = !!data.poisonPreviewActive;
+            poisonShrinkToRadius = Math.max(0, Number(data.poisonShrinkToRadius) || 0);
+            poisonRemoteRemainMs = Math.max(0, Number(data.poisonRemoteRemainMs) || 0);
+            poisonRemoteSyncAt = Date.now();
         }
 
         function createHealthPack() {
@@ -1444,7 +1791,7 @@ import { createMobileInputController } from './mobile-runtime.js';
             for (let i = 0; i < 3; i++) {
                 const mesh = createHealthPack();
                 const pos = findSafeSpawnPosition({ minFromCenter: 20, minRockDistance: 5, minPackDistance: 10, minWeaponBoxDistance: 10, minGrassDistance: 4 });
-                mesh.position.set(pos.x, 1.5, pos.z);
+                placeOnTerrain(mesh, pos.x, pos.z, 1.5);
                 healthPacks.push({ mesh, active: true, respawnTime: 0 });
             }
         }
@@ -1472,8 +1819,32 @@ import { createMobileInputController } from './mobile-runtime.js';
             for (let i = 0; i < 2; i++) {
                 const mesh = createWeaponBox();
                 const pos = findSafeSpawnPosition({ minFromCenter: 25, minRockDistance: 5, minPackDistance: 12, minWeaponBoxDistance: 12, minGrassDistance: 4 });
-                mesh.position.set(pos.x, 1.5, pos.z);
+                placeOnTerrain(mesh, pos.x, pos.z, 1.5);
                 weaponBoxes.push({ mesh, active: true, respawnTime: 0 });
+            }
+        }
+
+        function randomVolcanoCenterPosition(minR = 4, maxR = 18) {
+            const angle = rand() * Math.PI * 2;
+            const r = minR + rand() * (maxR - minR);
+            return { x: Math.cos(angle) * r, z: Math.sin(angle) * r };
+        }
+
+        function spawnVolcanoCenterSupplies() {
+            if (currentMapId !== 'volcano') return;
+            for (let i = 0; i < 8; i++) {
+                const mesh = createHealthPack();
+                const pos = randomVolcanoCenterPosition(4, 18);
+                placeOnTerrain(mesh, pos.x, pos.z, 1.5);
+                healthPacks.push({ mesh, active: true, respawnTime: 0, fixedVolcanoCenter: true });
+            }
+            if (!unlockAllWeapons) {
+                for (let i = 0; i < 10; i++) {
+                    const mesh = createWeaponBox();
+                    const pos = randomVolcanoCenterPosition(3, 16);
+                    placeOnTerrain(mesh, pos.x, pos.z, 1.5);
+                    weaponBoxes.push({ mesh, active: true, respawnTime: 0, fixedVolcanoCenter: true });
+                }
             }
         }
 
@@ -1514,7 +1885,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                 const radius = 7.5 + rand() * 4.5;
                 const pos = findSafeSpawnPosition({ minFromCenter: 24, minRockDistance: 8, minGrassDistance: 16, minPackDistance: 10 });
                 const mesh = createGrassPatch(radius, theme);
-                mesh.position.set(pos.x, 0, pos.z);
+                placeOnTerrain(mesh, pos.x, pos.z, 0);
                 grassPatches.push({ mesh, position: { x: pos.x, z: pos.z }, radius });
             }
         }
@@ -1621,6 +1992,7 @@ import { createMobileInputController } from './mobile-runtime.js';
         function toggleWeapon(playerKey, direction = 1) {
             const player = players[playerKey];
             if (!player.alive || player.hp <= 0) return false;
+            const prevWeapon = player.weapon;
             const available = getAvailableWeapons(player);
             if (available.length === 0) return false;
             let idx = available.indexOf(player.weapon);
@@ -1634,6 +2006,9 @@ import { createMobileInputController } from './mobile-runtime.js';
                 return false;
             }
             player.weapon = nextWeapon;
+            if (prevWeapon === 'ghostcannon' && nextWeapon !== 'ghostcannon') {
+                clearGhostBulletsByOwner(playerKey);
+            }
             updatePlayerHud(playerKey);
             if (playerKey === myRole) {
                 showWeaponSwitchToast(WEAPONS[player.weapon].name);
@@ -1725,6 +2100,10 @@ import { createMobileInputController } from './mobile-runtime.js';
                 }
                 return;
             }
+            if (player.weapon === 'ghostcannon' && countGhostBulletsByOwner(playerKey) >= 3) {
+                if (playerKey === myRole) showWeaponSwitchToast('幽灵炮已达上限(3)');
+                return;
+            }
 
             const muzzlePos = new THREE.Vector3();
             player.muzzle.getWorldPosition(muzzlePos);
@@ -1741,9 +2120,12 @@ import { createMobileInputController } from './mobile-runtime.js';
 
             const spawnBullet = (dir, extra = {}) => {
                 const isBL = extra.isBallLightning || extra.weapon === 'balllightning';
+                const isGhost = extra.isGhost || extra.weapon === 'ghostcannon';
                 const mat = isBL
                     ? new THREE.MeshBasicMaterial({ color: cfg.color, transparent: true, opacity: 0.92 })
-                    : new THREE.MeshBasicMaterial({ color: cfg.color });
+                    : (isGhost
+                        ? new THREE.MeshBasicMaterial({ color: cfg.color, transparent: true, opacity: 0.8 })
+                        : new THREE.MeshBasicMaterial({ color: cfg.color }));
                 const bulletMesh = new THREE.Mesh(
                     new THREE.SphereGeometry(cfg.size, 16, 12),
                     mat
@@ -1780,7 +2162,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                 if (canSpread) {
                     const maxSpread = (player.weapon === 'cannon' || player.weapon === 'toxic' || player.weapon === 'apcannon')
                         ? CANNON_SPREAD_ANGLE
-                        : (player.weapon === 'emgun' || player.weapon === 'blindgun' || player.weapon === 'balllightning')
+                        : (player.weapon === 'emgun' || player.weapon === 'blindgun' || player.weapon === 'balllightning' || player.weapon === 'ghostcannon')
                             ? 0
                             : MG_SPREAD_ANGLE;
                     const spreadAngle = (Math.random() - 0.5) * 2 * maxSpread;
@@ -1795,6 +2177,14 @@ import { createMobileInputController } from './mobile-runtime.js';
                     extra.durationMs = bl?.durationMs ?? BALL_LIGHTNING_DURATION_MS;
                     extra.damageRadius = bl?.damageRadius ?? BALL_LIGHTNING_DAMAGE_RADIUS;
                     extra.damageTickMs = bl?.damageTickMs ?? BALL_LIGHTNING_DAMAGE_TICK_MS;
+                } else if (player.weapon === 'ghostcannon') {
+                    const gh = WEAPONS.ghostcannon;
+                    extra.isGhost = true;
+                    extra.spawnTime = Date.now();
+                    extra.durationMs = gh?.durationMs ?? 30000;
+                    extra.turnRate = gh?.turnRate ?? 2.6;
+                    extra.hitTickMs = gh?.hitTickMs ?? 650;
+                    extra.lastDamageByTarget = {};
                 }
                 spawnBullet(dir, extra);
             }
@@ -1819,6 +2209,8 @@ import { createMobileInputController } from './mobile-runtime.js';
                     playSfx('toxicFire', { volume: 0.85, cooldownMs: 40 });
                 } else if (player.weapon === 'blindgun') {
                     playSfx('blindFire', { volume: 0.85, cooldownMs: 40 });
+                } else if (player.weapon === 'ghostcannon') {
+                    playSfx('ghostFire', { volume: 0.85, cooldownMs: 80 });
                 }
             }
         }
@@ -1834,7 +2226,25 @@ import { createMobileInputController } from './mobile-runtime.js';
             bullet.mesh.material.dispose();
         }
 
+        function countGhostBulletsByOwner(playerKey) {
+            let count = 0;
+            for (const b of bullets) {
+                if (b && b.isGhost && b.owner === playerKey) count += 1;
+            }
+            return count;
+        }
+
+        function clearGhostBulletsByOwner(playerKey) {
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                const b = bullets[i];
+                if (!b || !b.isGhost || b.owner !== playerKey) continue;
+                disposeBullet(b);
+                bullets.splice(i, 1);
+            }
+        }
+
         function checkBulletObstacleCollision(bullet, index) {
+            if (bullet.isGhost) return false;
             const bulletPos = bullet.mesh.position;
             for (const obstacle of obstacles) {
                 const dx = bulletPos.x - obstacle.position.x;
@@ -1862,6 +2272,7 @@ import { createMobileInputController } from './mobile-runtime.js';
 
         // 护盾碰撞：子弹路径或当前位置与护盾相交则立刻阻挡，优先于坦克受击判定
         function checkBulletShieldCollision(bullet, index, prevX, prevZ) {
+            if (bullet.isGhost) return false;
             const curX = bullet.mesh.position.x;
             const curZ = bullet.mesh.position.z;
             const bulletR = bullet.radius || 0;
@@ -1894,6 +2305,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                         socket.emit('shield_hit', { targetRole: key, shieldHp: newShieldHp });
                         if (newShieldHp <= 0) {
                             target.weapon = 'mg';
+                            clearGhostBulletsByOwner(key);
                             socket.emit('weapon_switch', { role: key, weapon: 'mg' });
                             updatePlayerHud(key);
                         }
@@ -1919,6 +2331,41 @@ import { createMobileInputController } from './mobile-runtime.js';
             const qx = ax + abx * t;
             const qz = az + abz * t;
             return Math.hypot(px - qx, pz - qz);
+        }
+
+        // 计算三维点到线段最短距离（含高度），用于避免“上方/下方擦过也算命中”
+        function pointToSegmentDistance3D(px, py, pz, ax, ay, az, bx, by, bz) {
+            const abx = bx - ax, aby = by - ay, abz = bz - az;
+            const apx = px - ax, apy = py - ay, apz = pz - az;
+            const abLen2 = abx * abx + aby * aby + abz * abz;
+            if (abLen2 <= 1e-9) return Math.hypot(apx, apy, apz);
+            let t = (apx * abx + apy * aby + apz * abz) / abLen2;
+            t = Math.max(0, Math.min(1, t));
+            const qx = ax + abx * t, qy = ay + aby * t, qz = az + abz * t;
+            return Math.hypot(px - qx, py - qy, pz - qz);
+        }
+
+        function checkBulletTerrainCollision(bullet, index, prevX, prevY, prevZ) {
+            if (bullet.isGhost) return false;
+            const curX = bullet.mesh.position.x;
+            const curY = bullet.mesh.position.y;
+            const curZ = bullet.mesh.position.z;
+            const r = bullet.radius || 0;
+            // 采样线段，避免高速子弹穿过陡坡
+            const steps = 4;
+            for (let i = 0; i <= steps; i++) {
+                const t = i / steps;
+                const sx = prevX + (curX - prevX) * t;
+                const sy = prevY + (curY - prevY) * t;
+                const sz = prevZ + (curZ - prevZ) * t;
+                const terrainY = getTerrainHeightAt(sx, sz);
+                if (sy <= terrainY + r) {
+                    disposeBullet(bullet);
+                    bullets.splice(index, 1);
+                    return true;
+                }
+            }
+            return false;
         }
 
         function detectDoubleTap(playerKey, code, now, isRepeat) {
@@ -1981,7 +2428,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                 if (bindings && code === bindings.weaponSwitch && !player.usingSatellite && !player.satelliteFiring) {
                     if (toggleWeapon(playerKey)) socket.emit('weapon_switch', { role: playerKey, weapon: player.weapon });
                 }
-                for (let i = 1; i <= 9; i++) {
+                for (let i = 1; i <= 10; i++) {
                     const wkey = 'weapon' + i;
                     if (bindings && bindings[wkey] && code === bindings[wkey] && !player.usingSatellite && !player.satelliteFiring) {
                         const weaponId = WEAPON_ORDER[i - 1];
@@ -1996,6 +2443,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                                 break;
                             }
                             player.weapon = weaponId;
+                            if (weaponId !== 'ghostcannon') clearGhostBulletsByOwner(playerKey);
                             updatePlayerHud(playerKey);
                             showWeaponSwitchToast(WEAPONS[player.weapon].name);
                             if (playerKey === myRole && weaponId === 'shield') playSfx('shieldSwitch', { volume: 0.85, cooldownMs: 200 });
@@ -2210,7 +2658,7 @@ import { createMobileInputController } from './mobile-runtime.js';
             indicator.castShadow = true;
             mineGroup.add(indicator);
             
-            mineGroup.position.set(position.x, 0, position.z);
+            mineGroup.position.set(position.x, getTerrainHeightAt(position.x, position.z), position.z);
             scene.add(mineGroup);
             // 刚放置的地雷在 1 秒内不生效，避免误伤自己
             mines.push({ mesh: mineGroup, owner: ownerKey, radius: MINE_RADIUS, armedAt: Date.now() + 1000 });
@@ -2273,7 +2721,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                 satellitePickup = { mesh: createSatellitePickup(), active: false, respawnTime: 0 };
             }
             const pos = findSafeSpawnPosition({ minFromCenter: 24, minRockDistance: 7, minPackDistance: 10, minGrassDistance: 5, minTankDistance: 12 });
-            satellitePickup.mesh.position.set(pos.x, 2.6, pos.z);
+            placeOnTerrain(satellitePickup.mesh, pos.x, pos.z, 2.6);
             satellitePickup.mesh.visible = true;
             satellitePickup.active = true;
             satellitePickup.respawnTime = 0;
@@ -2328,9 +2776,10 @@ import { createMobileInputController } from './mobile-runtime.js';
             ring.rotation.x = -Math.PI / 2;
             group.add(ring);
 
-            group.position.copy(position);
+            const baseY = getTerrainHeightAt(position.x, position.z);
+            group.position.set(position.x, baseY + 0.5, position.z);
             scene.add(group);
-            explosions.push({ mesh: group, start: performance.now(), type: 'normal' });
+            explosions.push({ mesh: group, start: performance.now(), type: 'normal', baseY });
         }
 
         function createSatelliteExplosionAt(position) {
@@ -2364,9 +2813,10 @@ import { createMobileInputController } from './mobile-runtime.js';
             flash.position.y = 27;
             group.add(flash);
 
-            group.position.copy(position);
+            const baseY = getTerrainHeightAt(position.x, position.z);
+            group.position.set(position.x, baseY + 0.4, position.z);
             scene.add(group);
-            explosions.push({ mesh: group, start: performance.now(), type: 'satellite' });
+            explosions.push({ mesh: group, start: performance.now(), type: 'satellite', baseY });
         }
 
         function updateExplosions(now) {
@@ -2385,7 +2835,8 @@ import { createMobileInputController } from './mobile-runtime.js';
                 }
                 const scale = exp.type === 'satellite' ? (1 + t * 6.8) : (1 + t * 3);
                 exp.mesh.scale.set(scale, scale, scale);
-                exp.mesh.position.y = exp.type === 'satellite' ? (0.3 + t * 2.2) : (0.5 + t * 1.5);
+                const baseY = exp.baseY ?? getTerrainHeightAt(exp.mesh.position.x, exp.mesh.position.z);
+                exp.mesh.position.y = baseY + (exp.type === 'satellite' ? (0.3 + t * 2.2) : (0.5 + t * 1.5));
                 exp.mesh.traverse(obj => {
                     if (obj.material && obj.material.transparent) {
                         obj.material.opacity = (exp.type === 'satellite' ? 0.95 : 0.9) * (1 - t);
@@ -2473,8 +2924,9 @@ import { createMobileInputController } from './mobile-runtime.js';
 
         function keepTankInBounds(player) {
             const margin = 4;
-            player.mesh.position.x = THREE.MathUtils.clamp(player.mesh.position.x, -MAP_HALF + margin, MAP_HALF - margin);
-            player.mesh.position.z = THREE.MathUtils.clamp(player.mesh.position.z, -MAP_HALF + margin, MAP_HALF - margin);
+            player.mesh.position.x = THREE.MathUtils.clamp(player.mesh.position.x, -currentMapHalf + margin, currentMapHalf - margin);
+            player.mesh.position.z = THREE.MathUtils.clamp(player.mesh.position.z, -currentMapHalf + margin, currentMapHalf - margin);
+            player.mesh.position.y = getTerrainHeightAt(player.mesh.position.x, player.mesh.position.z);
         }
 
         function resolveRockCollisions(playerKey) {
@@ -2603,11 +3055,13 @@ import { createMobileInputController } from './mobile-runtime.js';
         function updateHealthPacks(now) {
             for (const pack of healthPacks) {
                 if (pack.active) {
-                    pack.mesh.position.y = 1.5 + Math.sin(now * 0.003) * 0.3;
+                    pack.mesh.position.y = getTerrainHeightAt(pack.mesh.position.x, pack.mesh.position.z) + 1.5 + Math.sin(now * 0.003) * 0.3;
                     pack.mesh.rotation.y += 0.02;
                 } else if (now > pack.respawnTime) {
-                    const pos = findSafeSpawnPosition({ minFromCenter: 20, minRockDistance: 5, minPackDistance: 10, minGrassDistance: 4, minTankDistance: 8 });
-                    pack.mesh.position.set(pos.x, 1.5, pos.z);
+                    const pos = pack.fixedVolcanoCenter
+                        ? randomVolcanoCenterPosition(4, 18)
+                        : findSafeSpawnPosition({ minFromCenter: 20, minRockDistance: 5, minPackDistance: 10, minGrassDistance: 4, minTankDistance: 8 });
+                    placeOnTerrain(pack.mesh, pos.x, pos.z, 1.5);
                     pack.mesh.visible = true;
                     pack.active = true;
                 }
@@ -2641,11 +3095,13 @@ import { createMobileInputController } from './mobile-runtime.js';
         function updateWeaponBoxes(now) {
             for (const box of weaponBoxes) {
                 if (box.active) {
-                    box.mesh.position.y = 1.5 + Math.sin(now * 0.0025) * 0.25;
+                    box.mesh.position.y = getTerrainHeightAt(box.mesh.position.x, box.mesh.position.z) + 1.5 + Math.sin(now * 0.0025) * 0.25;
                     box.mesh.rotation.y += 0.015;
                 } else if (now > box.respawnTime) {
-                    const pos = findSafeSpawnPosition({ minFromCenter: 25, minRockDistance: 5, minPackDistance: 12, minWeaponBoxDistance: 12, minGrassDistance: 4, minTankDistance: 8 });
-                    box.mesh.position.set(pos.x, 1.5, pos.z);
+                    const pos = box.fixedVolcanoCenter
+                        ? randomVolcanoCenterPosition(3, 16)
+                        : findSafeSpawnPosition({ minFromCenter: 25, minRockDistance: 5, minPackDistance: 12, minWeaponBoxDistance: 12, minGrassDistance: 4, minTankDistance: 8 });
+                    placeOnTerrain(box.mesh, pos.x, pos.z, 1.5);
                     box.mesh.visible = true;
                     box.active = true;
                 }
@@ -2713,7 +3169,7 @@ import { createMobileInputController } from './mobile-runtime.js';
 
             if (satellitePickup.active) {
                 satellitePickup.mesh.rotation.y += 0.025;
-                satellitePickup.mesh.position.y = 2.6 + Math.sin(now * 0.0035) * 0.45;
+                satellitePickup.mesh.position.y = getTerrainHeightAt(satellitePickup.mesh.position.x, satellitePickup.mesh.position.z) + 2.6 + Math.sin(now * 0.0035) * 0.45;
 
                 const playerKey = myRole;
                 const player = players[playerKey];
@@ -2748,13 +3204,14 @@ import { createMobileInputController } from './mobile-runtime.js';
                 const canControlSatellite = !!(player.alive && player.hp > 0);
                 if (playerKey === myRole && canControlSatellite && player.usingSatellite && !player.satelliteFiring) {
                     const bindings = keyBindings[playerKey];
-                    const targetSpeed = SATELLITE_TARGET_SPEED * deltaSeconds;
+                    const targetSpeed = SATELLITE_TARGET_SPEED * (currentMapId === 'desert' ? 1.35 : 1) * deltaSeconds;
+                    const targetLimit = getSatelliteTargetLimit();
                     if (keys[bindings.forward]) player.satelliteTarget.z -= targetSpeed;
                     if (keys[bindings.backward]) player.satelliteTarget.z += targetSpeed;
                     if (keys[bindings.left]) player.satelliteTarget.x -= targetSpeed;
                     if (keys[bindings.right]) player.satelliteTarget.x += targetSpeed;
-                    player.satelliteTarget.x = clampToMap(player.satelliteTarget.x);
-                    player.satelliteTarget.z = clampToMap(player.satelliteTarget.z);
+                    player.satelliteTarget.x = THREE.MathUtils.clamp(player.satelliteTarget.x, -targetLimit, targetLimit);
+                    player.satelliteTarget.z = THREE.MathUtils.clamp(player.satelliteTarget.z, -targetLimit, targetLimit);
                 }
 
                 if (player.satelliteFiring && player.satelliteBeam) {
@@ -2787,41 +3244,143 @@ import { createMobileInputController } from './mobile-runtime.js';
 
         function updatePoison(now, deltaSeconds) {
             if (!poisonCircleEnabled) return;
+            if (poisonPhase === 'idle') initializePoisonSystem(now);
             const elapsed = (now - poisonStartTime) / 1000;
-            safeRadius = MAX_RADIUS * Math.max(0, 1 - elapsed / POISON_DURATION);
+            let phaseElapsed = now - poisonPhaseStartTime;
+            let phaseRemain = Math.max(0, poisonPhaseDurationMs - phaseElapsed);
+
+            if (isHostRole()) {
+                if (poisonPhase === 'warmup' && phaseElapsed >= poisonPhaseDurationMs) {
+                    beginPoisonPreview(now);
+                } else if (poisonPhase === 'preview' && phaseElapsed >= poisonPhaseDurationMs) {
+                    beginPoisonShrink(now);
+                } else if (poisonPhase === 'shrink') {
+                    const t = poisonPhaseDurationMs > 0
+                        ? THREE.MathUtils.clamp(phaseElapsed / poisonPhaseDurationMs, 0, 1)
+                        : 1;
+                    safeRadius = THREE.MathUtils.lerp(poisonShrinkFromRadius, poisonShrinkToRadius, t);
+                    poisonCenterX = THREE.MathUtils.lerp(poisonShrinkFromCenterX, poisonShrinkToCenterX, t);
+                    poisonCenterZ = THREE.MathUtils.lerp(poisonShrinkFromCenterZ, poisonShrinkToCenterZ, t);
+                    if (t >= 1) {
+                        safeRadius = poisonShrinkToRadius;
+                        poisonCenterX = poisonShrinkToCenterX;
+                        poisonCenterZ = poisonShrinkToCenterZ;
+                        poisonPreviewActive = false;
+                        if (poisonPreviewCircle) poisonPreviewCircle.visible = false;
+                        poisonStageIndex += 1;
+                        if (poisonStageIndex >= poisonStageTargetRadii.length || safeRadius <= 0.01) {
+                            poisonPhase = 'closed';
+                            poisonPhaseStartTime = now;
+                            poisonPhaseDurationMs = 0;
+                        } else {
+                            poisonPhase = 'hold';
+                            poisonPhaseStartTime = now;
+                            poisonPhaseDurationMs = POISON_HOLD_SECONDS * 1000;
+                        }
+                    }
+                } else if (poisonPhase === 'hold' && phaseElapsed >= poisonPhaseDurationMs) {
+                    beginPoisonPreview(now);
+                }
+                phaseElapsed = now - poisonPhaseStartTime;
+                phaseRemain = Math.max(0, poisonPhaseDurationMs - phaseElapsed);
+                poisonRemoteRemainMs = phaseRemain;
+                poisonRemoteSyncAt = now;
+                if (now - poisonLastSyncAt >= POISON_SYNC_INTERVAL_MS) {
+                    socket.emit('poison_state_sync', buildPoisonSyncPayload(now, phaseRemain));
+                    poisonLastSyncAt = now;
+                }
+            } else {
+                phaseRemain = Math.max(0, poisonRemoteRemainMs - (now - poisonRemoteSyncAt));
+            }
+
             updatePoisonCircleGeometry(safeRadius);
+            if (poisonCircle) poisonCircle.position.set(poisonCenterX, 0.1, poisonCenterZ);
+            if (poisonPreviewCircle) {
+                updatePoisonPreviewCircleGeometry(poisonPreviewRadius);
+                poisonPreviewCircle.position.set(poisonPreviewCenterX, 0.12, poisonPreviewCenterZ);
+                poisonPreviewCircle.visible = !!poisonPreviewActive;
+            }
             poisonTimerEl.style.display = 'block';
-            poisonTimerEl.textContent = `毒圈: ${Math.max(0, Math.ceil(POISON_DURATION - elapsed))}s`;
+            if (poisonPhase === 'warmup') {
+                poisonTimerEl.textContent = `毒圈将在 ${Math.ceil(phaseRemain / 1000)}s 后开始缩小`;
+            } else if (poisonPhase === 'preview') {
+                poisonTimerEl.textContent = `毒圈第${poisonStageIndex + 1}段预警: ${Math.ceil(phaseRemain / 1000)}s 后缩至半径 ${Math.round(poisonShrinkToRadius)}`;
+            } else if (poisonPhase === 'shrink') {
+                poisonTimerEl.textContent = `毒圈第${poisonStageIndex + 1}段缩小中: ${Math.ceil(phaseRemain / 1000)}s`;
+            } else if (poisonPhase === 'hold') {
+                poisonTimerEl.textContent = `毒圈等待: ${Math.ceil(phaseRemain / 1000)}s 后进入下一段`;
+            } else {
+                poisonTimerEl.textContent = '毒圈已闭合';
+            }
 
             // 毒圈伤害随时间递增：越到后期越疼
             const baseDps = 3;
             const extraDps = Math.max(0, elapsed - 30) / 10; // 每多 10 秒多 1 点
-            const shrinkFactor = 1 - safeRadius / MAX_RADIUS;
+            const shrinkFactor = 1 - safeRadius / poisonMaxRadius;
             const circleBonus = shrinkFactor * 6; // 圈越小额外伤害越高
             const dmgPerSecond = baseDps + extraDps + circleBonus;
 
             for (const playerKey of PLAYER_KEYS) {
                 const player = players[playerKey];
                 if (!player.mesh || !player.alive || player.hp <= 0) continue;
-                const dist = Math.hypot(player.mesh.position.x, player.mesh.position.z);
+                const dist = Math.hypot(player.mesh.position.x - poisonCenterX, player.mesh.position.z - poisonCenterZ);
                 if (dist > safeRadius) {
                     applyDamage(playerKey, dmgPerSecond * deltaSeconds);
                 }
             }
         }
 
+        function findNearestEnemyForGhostBullet(bullet) {
+            let best = null;
+            let bestDist = Infinity;
+            for (const key of PLAYER_KEYS) {
+                if (key === bullet.owner) continue;
+                const p = players[key];
+                if (!p?.mesh || !p.alive || p.hp <= 0) continue;
+                const dx = p.mesh.position.x - bullet.mesh.position.x;
+                const dz = p.mesh.position.z - bullet.mesh.position.z;
+                const dist = Math.hypot(dx, dz);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    best = key;
+                }
+            }
+            return best;
+        }
+
         function updateBullets(deltaSeconds) {
             for (let i = bullets.length - 1; i >= 0; i--) {
                 const bullet = bullets[i];
+                const now = Date.now();
+                if (bullet.isGhost) {
+                    const lifeMs = bullet.durationMs ?? (WEAPONS.ghostcannon?.durationMs ?? 30000);
+                    if (now - (bullet.spawnTime ?? now) > lifeMs) {
+                        disposeBullet(bullet);
+                        bullets.splice(i, 1);
+                        continue;
+                    }
+                    const targetKey = findNearestEnemyForGhostBullet(bullet);
+                    if (targetKey) {
+                        const target = players[targetKey];
+                        const desired = new THREE.Vector3(
+                            target.mesh.position.x - bullet.mesh.position.x,
+                            (target.mesh.position.y + 1.0) - bullet.mesh.position.y,
+                            target.mesh.position.z - bullet.mesh.position.z
+                        ).normalize();
+                        const turnLerp = THREE.MathUtils.clamp((bullet.turnRate ?? 2.6) * deltaSeconds, 0, 1);
+                        bullet.dir.lerp(desired, turnLerp).normalize();
+                    }
+                }
                 const prevX = bullet.mesh.position.x;
+                const prevY = bullet.mesh.position.y;
                 const prevZ = bullet.mesh.position.z;
                 bullet.mesh.position.addScaledVector(bullet.dir, bullet.speed * deltaSeconds);
+                if (checkBulletTerrainCollision(bullet, i, prevX, prevY, prevZ)) continue;
                 if (checkBulletObstacleCollision(bullet, i)) continue;
                 if (checkBulletShieldCollision(bullet, i, prevX, prevZ)) continue;
 
                 // 球状闪电：缓慢移动、范围伤害、连接电弧
                 if (bullet.isBallLightning) {
-                    const now = Date.now();
                     if (now - bullet.spawnTime > (bullet.durationMs ?? BALL_LIGHTNING_DURATION_MS)) {
                         disposeBullet(bullet);
                         bullets.splice(i, 1);
@@ -2834,7 +3393,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                         if (!p.mesh || !p.alive || p.hp <= 0) continue;
                         const dx = bullet.mesh.position.x - p.mesh.position.x;
                         const dz = bullet.mesh.position.z - p.mesh.position.z;
-                        const visualLineRadius = (bullet.damageRadius ?? BALL_LIGHTNING_DAMAGE_RADIUS) + 4;
+                        const visualLineRadius = (bullet.damageRadius ?? BALL_LIGHTNING_DAMAGE_RADIUS) + 10;
                         if (Math.hypot(dx, dz) <= visualLineRadius) inRange.push(key);
                     }
                     if (isHostRole()) {
@@ -2880,7 +3439,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                     }
                     bullet.connectionLines.geometry.attributes.position.needsUpdate = true;
                     bullet.connectionLines.geometry.setDrawRange(0, count * 2);
-                    if (Math.abs(bullet.mesh.position.x) > MAP_HALF * 1.5 || Math.abs(bullet.mesh.position.z) > MAP_HALF * 1.5) {
+                    if (Math.abs(bullet.mesh.position.x) > currentMapHalf * 1.5 || Math.abs(bullet.mesh.position.z) > currentMapHalf * 1.5) {
                         disposeBullet(bullet);
                         bullets.splice(i, 1);
                     }
@@ -2907,11 +3466,13 @@ import { createMobileInputController } from './mobile-runtime.js';
                             bullet.piercingLastDamage = now;
                             const dmg = cfg?.piercingDmgPerTick ?? 6;
                             socket.emit('hit_report', {
+                                sourceRole: bullet.owner,
                                 targetRole: targetKey,
                                 dmg,
                                 weapon: 'apcannon',
                                 slowEndAt: now + (cfg?.slowDurationMs ?? 700),
-                                slowMult: cfg?.slowMult ?? 0.05
+                                knockbackDirX: bullet.dir.x,
+                                knockbackDirZ: bullet.dir.z
                             });
                         }
                     }
@@ -2926,15 +3487,30 @@ import { createMobileInputController } from './mobile-runtime.js';
                         const target = players[key];
                         if (!target.mesh || !target.alive || target.hp <= 0) continue;
                         // 护盾已在 checkBulletShieldCollision 中优先判定并阻挡
-                        const sweepDist = pointToSegmentDistance2D(
-                            target.mesh.position.x,
-                            target.mesh.position.z,
-                            prevX,
-                            prevZ,
-                            bullet.mesh.position.x,
-                            bullet.mesh.position.z
+                        const targetCx = target.mesh.position.x;
+                        const targetCy = target.mesh.position.y + 1.0;
+                        const targetCz = target.mesh.position.z;
+                        const sweepDist = pointToSegmentDistance3D(
+                            targetCx, targetCy, targetCz,
+                            prevX, prevY, prevZ,
+                            bullet.mesh.position.x, bullet.mesh.position.y, bullet.mesh.position.z
                         );
                         if (sweepDist < (2.2 + (bullet.radius || 0))) {
+                            if (bullet.isGhost) {
+                                const last = bullet.lastDamageByTarget[key] ?? 0;
+                                const tickMs = bullet.hitTickMs ?? (WEAPONS.ghostcannon?.hitTickMs ?? 650);
+                                if (now - last >= tickMs) {
+                                    bullet.lastDamageByTarget[key] = now;
+                                    socket.emit('hit_report', {
+                                        sourceRole: bullet.owner,
+                                        targetRole: key,
+                                        dmg: bullet.dmg,
+                                        weapon: 'ghostcannon'
+                                    });
+                                }
+                                hit = true;
+                                break;
+                            }
                             // 穿甲弹：命中后减速穿透，不销毁，体内持续伤害
                             if (bullet.weapon === 'apcannon' && !bullet.insideTarget) {
                                 const cfg = WEAPONS.apcannon;
@@ -2943,11 +3519,13 @@ import { createMobileInputController } from './mobile-runtime.js';
                                 bullet.piercingLastDamage = Date.now();
                                 bullet.piercingHoldUntil = Date.now() + 450;
                                 socket.emit('hit_report', {
+                                    sourceRole: bullet.owner,
                                     targetRole: key,
                                     dmg: bullet.dmg,
                                     weapon: 'apcannon',
                                     slowEndAt: Date.now() + (cfg?.slowDurationMs ?? 700),
-                                    slowMult: cfg?.slowMult ?? 0.05
+                                    knockbackDirX: bullet.dir.x,
+                                    knockbackDirZ: bullet.dir.z
                                 });
                                 hit = true;
                                 break;
@@ -3002,15 +3580,19 @@ import { createMobileInputController } from './mobile-runtime.js';
                         const target = players[key];
                         if (!target.mesh || !target.alive || target.hp <= 0) continue;
                         // 护盾已在 checkBulletShieldCollision 中优先判定并阻挡
-                        const sweepDist = pointToSegmentDistance2D(
-                            target.mesh.position.x,
-                            target.mesh.position.z,
-                            prevX,
-                            prevZ,
-                            bullet.mesh.position.x,
-                            bullet.mesh.position.z
+                        const targetCx = target.mesh.position.x;
+                        const targetCy = target.mesh.position.y + 1.0;
+                        const targetCz = target.mesh.position.z;
+                        const sweepDist = pointToSegmentDistance3D(
+                            targetCx, targetCy, targetCz,
+                            prevX, prevY, prevZ,
+                            bullet.mesh.position.x, bullet.mesh.position.y, bullet.mesh.position.z
                         );
                         if (sweepDist < (2.2 + (bullet.radius || 0))) {
+                            if (bullet.isGhost) {
+                                hit = true;
+                                break;
+                            }
                             // 穿甲弹：非主机也减速穿透，不销毁
                             if (bullet.weapon === 'apcannon' && !bullet.insideTarget) {
                                 const cfg = WEAPONS.apcannon;
@@ -3034,12 +3616,15 @@ import { createMobileInputController } from './mobile-runtime.js';
                     const mdx = bullet.mesh.position.x - me.mesh.position.x;
                     const mdz = bullet.mesh.position.z - me.mesh.position.z;
                     const nearDist = Math.hypot(mdx, mdz);
-                    if (nearDist >= 2.2 && nearDist <= 4.6) {
+                    if (bullet.isGhost && nearDist <= 100) {
+                        playSfx('ghostNear', { volume: 0.72, cooldownMs: 4000 });
+                    }
+                    if (nearDist >= 2.2 && nearDist <= 4.6 && !bullet.isGhost) {
                         playSfx('nearMiss', { volume: 0.7, cooldownMs: 220 });
                     }
                 }
 
-                const outLimit = MAP_HALF * 1.5;
+                const outLimit = currentMapHalf * 1.5;
                 if (Math.abs(bullet.mesh.position.x) > outLimit || Math.abs(bullet.mesh.position.z) > outLimit) {
                     disposeBullet(bullet);
                     bullets.splice(i, 1);
@@ -3619,11 +4204,12 @@ import { createMobileInputController } from './mobile-runtime.js';
 
         // 在小地图上画圆点（用于敌方坦克）
         function drawTankDot(centerX, centerY, player, color) {
+            const mapHalfForMini = Math.max(1, currentMapHalf);
             minimapCtx.fillStyle = color;
             minimapCtx.beginPath();
             minimapCtx.arc(
-                centerX + (player.mesh.position.x / MAP_HALF) * MINIMAP_RADIUS,
-                centerY + (player.mesh.position.z / MAP_HALF) * MINIMAP_RADIUS,
+                centerX + (player.mesh.position.x / mapHalfForMini) * MINIMAP_RADIUS,
+                centerY + (player.mesh.position.z / mapHalfForMini) * MINIMAP_RADIUS,
                 4, 0, Math.PI * 2
             );
             minimapCtx.fill();
@@ -3631,8 +4217,9 @@ import { createMobileInputController } from './mobile-runtime.js';
 
         // 在小地图上画箭头指针（用于自己的坦克）
         function drawTankArrow(centerX, centerY, player, color) {
-            const px = centerX + (player.mesh.position.x / MAP_HALF) * MINIMAP_RADIUS;
-            const py = centerY + (player.mesh.position.z / MAP_HALF) * MINIMAP_RADIUS;
+            const mapHalfForMini = Math.max(1, currentMapHalf);
+            const px = centerX + (player.mesh.position.x / mapHalfForMini) * MINIMAP_RADIUS;
+            const py = centerY + (player.mesh.position.z / mapHalfForMini) * MINIMAP_RADIUS;
             const angle = player.mesh.rotation.y;
             const size = 7;
             minimapCtx.save();
@@ -3660,29 +4247,57 @@ import { createMobileInputController } from './mobile-runtime.js';
         }
 
         function drawMinimapCircle(centerX, centerY, selfKey) {
+            const mapHalfForMini = Math.max(1, currentMapHalf);
+            const miniBg = currentMapId === 'desert'
+                ? '#8a6a43'
+                : (currentMapId === 'volcano' ? '#4a2e2e' : (currentMapId === 'jungle' ? '#214f2a' : '#2e5d30'));
+            const miniGrass = currentMapId === 'desert'
+                ? '#9d7b4f'
+                : (currentMapId === 'volcano' ? '#5a3a3a' : '#21461e');
+            const miniObstacle = currentMapId === 'desert'
+                ? '#6a5a45'
+                : (currentMapId === 'volcano' ? '#5a5050' : '#878787');
+            const miniBuilding = currentMapId === 'desert'
+                ? 'rgba(196, 165, 116, 0.85)'
+                : (currentMapId === 'volcano' ? 'rgba(135, 120, 120, 0.85)' : 'rgba(220, 220, 220, 0.85)');
             minimapCtx.save();
             minimapCtx.beginPath();
             minimapCtx.arc(centerX, centerY, MINIMAP_RADIUS, 0, Math.PI * 2);
             minimapCtx.closePath();
-            minimapCtx.fillStyle = '#2e5d30';
+            minimapCtx.fillStyle = miniBg;
             minimapCtx.fill();
             minimapCtx.clip();
 
             if (poisonCircleEnabled) {
                 minimapCtx.fillStyle = 'rgba(153, 0, 255, 0.28)';
+                const poisonCenterMiniX = centerX + (poisonCenterX / mapHalfForMini) * MINIMAP_RADIUS;
+                const poisonCenterMiniY = centerY + (poisonCenterZ / mapHalfForMini) * MINIMAP_RADIUS;
                 minimapCtx.beginPath();
                 minimapCtx.arc(centerX, centerY, MINIMAP_RADIUS, 0, Math.PI * 2);
-                minimapCtx.arc(centerX, centerY, (safeRadius / MAP_HALF) * MINIMAP_RADIUS, 0, Math.PI * 2, true);
+                minimapCtx.arc(poisonCenterMiniX, poisonCenterMiniY, (safeRadius / mapHalfForMini) * MINIMAP_RADIUS, 0, Math.PI * 2, true);
                 minimapCtx.fill();
+                if (poisonPreviewActive) {
+                    minimapCtx.strokeStyle = 'rgba(255, 209, 102, 0.95)';
+                    minimapCtx.lineWidth = 2;
+                    minimapCtx.beginPath();
+                    minimapCtx.arc(
+                        centerX + (poisonPreviewCenterX / mapHalfForMini) * MINIMAP_RADIUS,
+                        centerY + (poisonPreviewCenterZ / mapHalfForMini) * MINIMAP_RADIUS,
+                        (Math.max(1.6, poisonPreviewRadius) / mapHalfForMini) * MINIMAP_RADIUS,
+                        0,
+                        Math.PI * 2
+                    );
+                    minimapCtx.stroke();
+                }
             }
 
             for (const patch of grassPatches) {
-                minimapCtx.fillStyle = '#21461e';
+                minimapCtx.fillStyle = miniGrass;
                 minimapCtx.beginPath();
                 minimapCtx.arc(
-                    centerX + (patch.position.x / MAP_HALF) * MINIMAP_RADIUS,
-                    centerY + (patch.position.z / MAP_HALF) * MINIMAP_RADIUS,
-                    (patch.radius / MAP_HALF) * MINIMAP_RADIUS,
+                    centerX + (patch.position.x / mapHalfForMini) * MINIMAP_RADIUS,
+                    centerY + (patch.position.z / mapHalfForMini) * MINIMAP_RADIUS,
+                    (patch.radius / mapHalfForMini) * MINIMAP_RADIUS,
                     0,
                     Math.PI * 2
                 );
@@ -3690,12 +4305,12 @@ import { createMobileInputController } from './mobile-runtime.js';
             }
 
             for (const obj of obstacles) {
-                minimapCtx.fillStyle = obj.userData.isTree ? '#2d5a27' : '#878787';
-                const r = obj.userData.isTree ? Math.max(2, (obj.userData.collisionRadius / MAP_HALF) * MINIMAP_RADIUS * 0.5) : 3;
+                minimapCtx.fillStyle = obj.userData.isTree ? '#2d5a27' : (obj.userData.isCactus ? '#4f7f3a' : miniObstacle);
+                const r = obj.userData.isTree ? Math.max(2, (obj.userData.collisionRadius / mapHalfForMini) * MINIMAP_RADIUS * 0.5) : 3;
                 minimapCtx.beginPath();
                 minimapCtx.arc(
-                    centerX + (obj.position.x / MAP_HALF) * MINIMAP_RADIUS,
-                    centerY + (obj.position.z / MAP_HALF) * MINIMAP_RADIUS,
+                    centerX + (obj.position.x / mapHalfForMini) * MINIMAP_RADIUS,
+                    centerY + (obj.position.z / mapHalfForMini) * MINIMAP_RADIUS,
                     r,
                     0,
                     Math.PI * 2
@@ -3709,9 +4324,9 @@ import { createMobileInputController } from './mobile-runtime.js';
                 minimapCtx.fillStyle = pondColor;
                 minimapCtx.beginPath();
                 minimapCtx.arc(
-                    centerX + (pond.position.x / MAP_HALF) * MINIMAP_RADIUS,
-                    centerY + (pond.position.z / MAP_HALF) * MINIMAP_RADIUS,
-                    (pond.userData.collisionRadius / MAP_HALF) * MINIMAP_RADIUS,
+                    centerX + (pond.position.x / mapHalfForMini) * MINIMAP_RADIUS,
+                    centerY + (pond.position.z / mapHalfForMini) * MINIMAP_RADIUS,
+                    (pond.userData.collisionRadius / mapHalfForMini) * MINIMAP_RADIUS,
                     0,
                     Math.PI * 2
                 );
@@ -3719,10 +4334,10 @@ import { createMobileInputController } from './mobile-runtime.js';
             }
 
             // 建筑物（用小方块表示）
-            minimapCtx.fillStyle = 'rgba(220, 220, 220, 0.85)';
+            minimapCtx.fillStyle = miniBuilding;
             for (const b of buildings) {
-                const x = centerX + (b.position.x / MAP_HALF) * MINIMAP_RADIUS;
-                const y = centerY + (b.position.z / MAP_HALF) * MINIMAP_RADIUS;
+                const x = centerX + (b.position.x / mapHalfForMini) * MINIMAP_RADIUS;
+                const y = centerY + (b.position.z / mapHalfForMini) * MINIMAP_RADIUS;
                 minimapCtx.fillRect(x - 2, y - 2, 4, 4);
             }
 
@@ -3730,8 +4345,8 @@ import { createMobileInputController } from './mobile-runtime.js';
             minimapCtx.lineWidth = 2;
             for (const pack of healthPacks) {
                 if (!pack.active) continue;
-                const x = centerX + (pack.mesh.position.x / MAP_HALF) * MINIMAP_RADIUS;
-                const y = centerY + (pack.mesh.position.z / MAP_HALF) * MINIMAP_RADIUS;
+                const x = centerX + (pack.mesh.position.x / mapHalfForMini) * MINIMAP_RADIUS;
+                const y = centerY + (pack.mesh.position.z / mapHalfForMini) * MINIMAP_RADIUS;
                 minimapCtx.beginPath();
                 minimapCtx.moveTo(x - 4, y);
                 minimapCtx.lineTo(x + 4, y);
@@ -3744,15 +4359,15 @@ import { createMobileInputController } from './mobile-runtime.js';
                 minimapCtx.fillStyle = '#aa66ff';
                 for (const box of weaponBoxes) {
                     if (!box.active) continue;
-                    const x = centerX + (box.mesh.position.x / MAP_HALF) * MINIMAP_RADIUS;
-                    const y = centerY + (box.mesh.position.z / MAP_HALF) * MINIMAP_RADIUS;
+                    const x = centerX + (box.mesh.position.x / mapHalfForMini) * MINIMAP_RADIUS;
+                    const y = centerY + (box.mesh.position.z / mapHalfForMini) * MINIMAP_RADIUS;
                     minimapCtx.fillRect(x - 3, y - 3, 6, 6);
                 }
             }
 
             if (satelliteLaserEnabled && satellitePickup && satellitePickup.active) {
-                const x = centerX + (satellitePickup.mesh.position.x / MAP_HALF) * MINIMAP_RADIUS;
-                const y = centerY + (satellitePickup.mesh.position.z / MAP_HALF) * MINIMAP_RADIUS;
+                const x = centerX + (satellitePickup.mesh.position.x / mapHalfForMini) * MINIMAP_RADIUS;
+                const y = centerY + (satellitePickup.mesh.position.z / mapHalfForMini) * MINIMAP_RADIUS;
                 minimapCtx.fillStyle = '#d97cff';
                 minimapCtx.beginPath();
                 minimapCtx.moveTo(x, y - 5);
@@ -3771,8 +4386,8 @@ import { createMobileInputController } from './mobile-runtime.js';
                 minimapCtx.fillStyle = getUiColor(selfKey);
                 minimapCtx.beginPath();
                 minimapCtx.arc(
-                    centerX + (mine.mesh.position.x / MAP_HALF) * MINIMAP_RADIUS,
-                    centerY + (mine.mesh.position.z / MAP_HALF) * MINIMAP_RADIUS,
+                    centerX + (mine.mesh.position.x / mapHalfForMini) * MINIMAP_RADIUS,
+                    centerY + (mine.mesh.position.z / mapHalfForMini) * MINIMAP_RADIUS,
                     2.5,
                     0,
                     Math.PI * 2
@@ -3811,6 +4426,15 @@ import { createMobileInputController } from './mobile-runtime.js';
             drawMinimapCircle(MINIMAP_RADIUS + 15, vp.height - MINIMAP_RADIUS - 15, selfKey);
         }
 
+        function updatePoisonTimerPosition() {
+            if (!poisonTimerEl) return;
+            poisonTimerEl.style.left = isTouchDevice ? '12px' : '18px';
+            poisonTimerEl.style.top = 'auto';
+            poisonTimerEl.style.transform = 'none';
+            poisonTimerEl.style.right = 'auto';
+            poisonTimerEl.style.bottom = `${Math.round(MINIMAP_RADIUS * 2 + (isTouchDevice ? 6 : 30))}px`;
+        }
+
         function resize() {
             const vp = getAdaptiveViewportSize();
             renderer.setSize(vp.width, vp.height);
@@ -3823,6 +4447,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                 blindOverlayCanvas.width = vp.width;
                 blindOverlayCanvas.height = vp.height;
             }
+            updatePoisonTimerPosition();
         }
 
         window.addEventListener('resize', resize);
@@ -3859,7 +4484,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                     const role = data.role;
                     if (role === myRole) return;
                     if (players[role] && players[role].mesh) {
-                        players[role].mesh.position.set(data.x, 0, data.z);
+                        players[role].mesh.position.set(data.x, getTerrainHeightAt(data.x, data.z), data.z);
                         players[role].mesh.rotation.y = data.rot;
                         if (data.turretRot !== undefined && players[role].turretMesh) {
                             players[role].turretYaw = data.turretRot;
@@ -3885,7 +4510,11 @@ import { createMobileInputController } from './mobile-runtime.js';
                     if (!data || !data.role || !data.weapon) return;
                     const role = data.role;
                     if (!players[role]) return;
+                    const prevWeapon = players[role].weapon;
                     players[role].weapon = data.weapon;
+                    if (prevWeapon === 'ghostcannon' && data.weapon !== 'ghostcannon') {
+                        clearGhostBulletsByOwner(role);
+                    }
                     updatePlayerHud(role);
                 };
                 socket.on('enemy_weapon_switch', enemyWeaponSwitchHandler);
@@ -3962,7 +4591,10 @@ import { createMobileInputController } from './mobile-runtime.js';
                             playPositionalSfx('shieldHit', target.mesh.position, { minDist: 4, maxDist: 52, baseVolume: 0.95, cooldownMs: 400 });
                         }
                     }
-                    if (data.shieldHp <= 0) target.weapon = 'mg';
+                    if (data.shieldHp <= 0) {
+                        target.weapon = 'mg';
+                        clearGhostBulletsByOwner(data.targetRole);
+                    }
                     updatePlayerHud(data.targetRole);
                     updateShieldHpUI();
                 };
@@ -3995,9 +4627,29 @@ import { createMobileInputController } from './mobile-runtime.js';
                         const cur = players[role].balllightningSlowEndTime || 0;
                         players[role].balllightningSlowEndTime = Math.max(cur, data.slowEndAt);
                     }
-                    if (data.weapon === 'apcannon' && typeof data.slowEndAt === 'number') {
-                        const cur = players[role].apcannonSlowEndTime || 0;
-                        players[role].apcannonSlowEndTime = Math.max(cur, data.slowEndAt);
+                    if (data.weapon === 'apcannon' && target.mesh) {
+                        let nx = 0;
+                        let nz = 0;
+                        if (typeof data.slowEndAt === 'number') {
+                            const cur = players[role].apcannonSlowEndTime || 0;
+                            players[role].apcannonSlowEndTime = Math.max(cur, data.slowEndAt);
+                        }
+                        if (typeof data.knockbackDirX === 'number' && typeof data.knockbackDirZ === 'number') {
+                            nx = data.knockbackDirX;
+                            nz = data.knockbackDirZ;
+                        }
+                        let len = Math.hypot(nx, nz);
+                        if (len < 0.0001) {
+                            nx = Math.cos(target.mesh.rotation.y);
+                            nz = Math.sin(target.mesh.rotation.y);
+                            len = Math.hypot(nx, nz);
+                        }
+                        nx /= len;
+                        nz /= len;
+                        const knockbackDist = WEAPONS.apcannon?.knockbackDist ?? 0.35; // 穿甲弹击退
+                        target.mesh.position.x += nx * knockbackDist;
+                        target.mesh.position.z += nz * knockbackDist;
+                        keepTankInBounds(target);
                     }
                 };
                 socket.on('hit_sync', hitSyncHandler);
@@ -4066,13 +4718,18 @@ import { createMobileInputController } from './mobile-runtime.js';
             bulletSpreadEnabled = !!config.bulletSpreadEnabled;
             const mapId = (config.mapId && MAP_IDS.includes(config.mapId)) ? config.mapId : 'grassland';
             currentMapId = mapId;
+            const mapScale = getMapScale(mapId);
+            currentMapHalf = MAP_HALF * mapScale;
             const mapTheme = MAP_THEMES[mapId];
             SKY_BG_COLOR.setHex(mapTheme.sky);
             scene.background = SKY_BG_COLOR;
             floor.material.color.setHex(mapTheme.floor);
             blindGround.material.color.setHex(mapTheme.floor);
+            const mapFloorSize = floorSize * mapScale;
+            rebuildFloorGeometry(mapId, mapFloorSize);
             scene.remove(grid);
-            grid = new THREE.GridHelper(floorSize, 40, mapTheme.grid, mapTheme.grid);
+            grid = new THREE.GridHelper(mapFloorSize, Math.max(40, Math.floor(40 * mapScale)), mapTheme.grid, mapTheme.grid);
+            grid.visible = !(mapId === 'desert' || mapId === 'volcano');
             scene.add(grid);
             minesEnabled = !!config.minesEnabled;
             satelliteLaserEnabled = !!config.satelliteLaserEnabled;
@@ -4120,11 +4777,18 @@ import { createMobileInputController } from './mobile-runtime.js';
                 const pond = ponds.pop();
                 if (pond) scene.remove(pond);
             }
+            clearTerrainDecors();
             if (poisonCircle) {
                 scene.remove(poisonCircle);
                 if (poisonCircle.geometry) poisonCircle.geometry.dispose();
                 if (poisonCircle.material) poisonCircle.material.dispose();
                 poisonCircle = null;
+            }
+            if (poisonPreviewCircle) {
+                scene.remove(poisonPreviewCircle);
+                if (poisonPreviewCircle.geometry) poisonPreviewCircle.geometry.dispose();
+                if (poisonPreviewCircle.material) poisonPreviewCircle.material.dispose();
+                poisonPreviewCircle = null;
             }
             if (satellitePickup && satellitePickup.mesh) {
                 scene.remove(satellitePickup.mesh);
@@ -4140,6 +4804,8 @@ import { createMobileInputController } from './mobile-runtime.js';
             spawnPonds(mapTheme);
             spawnBuildings(typeof config.buildingCount === 'number' ? config.buildingCount : null, mapTheme);
             spawnTrees(mapTheme);
+            spawnCacti();
+            spawnVolcanoCrater(mapTheme);
 
             const rolesToSpawn = (activeRoles && activeRoles.length > 0)
                 ? activeRoles.filter(r => PLAYER_KEYS.includes(r))
@@ -4196,7 +4862,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                 p.satelliteTarget.x = 0;
                 p.satelliteTarget.z = 0;
                 const sp = spawnMap[role];
-                p.mesh.position.set(sp.x, 0, sp.z);
+                p.mesh.position.set(sp.x, getTerrainHeightAt(sp.x, sp.z), sp.z);
                 p.mesh.rotation.y = sp.rot;
                 assignTankLayers(role);
             }
@@ -4204,14 +4870,18 @@ import { createMobileInputController } from './mobile-runtime.js';
             rolesToSpawn.forEach((role) => setTankVisibilityForOpponent(role, true));
 
             spawnGrassPatches(mapTheme);
-            spawnHealthPacks();
+            if (currentMapId === 'volcano') {
+                spawnVolcanoCenterSupplies();
+            } else {
+                spawnHealthPacks();
+            }
             if (satelliteLaserEnabled) spawnSatellitePickup();
-            if (!unlockAllWeapons) spawnWeaponBoxes();
+            if (!unlockAllWeapons && currentMapId !== 'volcano') spawnWeaponBoxes();
 
             if (poisonCircleEnabled) {
-                poisonStartTime = Date.now();
-                safeRadius = MAX_RADIUS;
+                refreshPoisonSettingsByMap();
                 createPoisonCircle();
+                initializePoisonSystem(Date.now());
                 poisonTimerEl.style.display = 'block';
             } else {
                 poisonTimerEl.style.display = 'none';
@@ -4529,7 +5199,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                 new THREE.MeshStandardMaterial({ color: 0x000000, metalness: 0.4, roughness: 0.6 })
             );
             box.position.copy(pos);
-            box.position.y = 0.4;
+            box.position.y = getTerrainHeightAt(pos.x, pos.z) + 0.4;
             box.rotation.y = rotY;
             box.castShadow = true;
             box.receiveShadow = true;

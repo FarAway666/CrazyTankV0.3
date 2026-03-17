@@ -93,6 +93,7 @@ const ACTION_LABELS = {
     weapon7: '武器7-护盾',
     weapon8: '武器8-穿甲炮',
     weapon9: '武器9-球状闪电',
+    weapon10: '武器10-幽灵炮',
     scope: '瞄准镜',
     mine: '地雷',
     turretLock: '炮台锁定车身'
@@ -118,32 +119,35 @@ const DEFAULT_KEYS = {
     weapon7: 'Digit7',
     weapon8: 'Digit8',
     weapon9: 'Digit9',
+    weapon10: 'Digit0',
     scope: 'KeyE',
     mine: 'KeyZ',
     turretLock: 'KeyB'
 };
 
-// 武器顺序，对应数字键 1-9
-const WEAPON_ORDER = ['mg', 'cannon', 'shotgun', 'emgun', 'toxic', 'blindgun', 'shield', 'apcannon', 'balllightning'];
+// 武器顺序，对应数字键 1-0
+const WEAPON_ORDER = ['mg', 'cannon', 'shotgun', 'emgun', 'toxic', 'blindgun', 'shield', 'apcannon', 'balllightning', 'ghostcannon'];
 // 基础武器：所有人开局可用
 const BASE_WEAPONS = ['mg', 'cannon', 'shotgun'];
 // 高级武器：需拾取武器箱随机解锁
-const PREMIUM_WEAPONS = ['emgun', 'toxic', 'blindgun', 'shield', 'apcannon', 'balllightning'];
+const PREMIUM_WEAPONS = ['emgun', 'toxic', 'blindgun', 'shield', 'apcannon', 'balllightning', 'ghostcannon'];
 
 const WEAPONS = {
-    mg:      { name: '机枪',   dmg: 1.2, cd: 35,   speed: 120, color: 0xff4400, size: 0.15 },
-    cannon:  { name: '狙击炮', dmg: 33,  cd: 2000,  speed: 550,  color: 0xffaa00, size: 0.1  },
-    shotgun: { name: '霰弹炮', dmg: 2.5,   cd: 1000, speed: 200,  color: 0x00ff88, size: 0.05, pelletCount: 15 },
-    emgun:   { name: '冰冻炮', dmg: 4.5,   cd: 500,  speed: 200, color: 0x0088ff, size: 0.3, stunDuration: 300 },
+    mg:      { name: '机枪',   dmg: 1, cd: 35,   speed: 120, color: 0xff4400, size: 0.15 },
+    cannon:  { name: '狙击炮', dmg: 33,  cd: 2500,  speed: 550,  color: 0xffaa00, size: 0.1  },
+    shotgun: { name: '霰弹炮', dmg: 2.25,   cd: 1000, speed: 200,  color: 0x00ff88, size: 0.05, pelletCount: 15 },
+    emgun:   { name: '冰冻炮', dmg: 4,   cd: 500,  speed: 200, color: 0x0088ff, size: 0.3, stunDuration: 350 },
     toxic:   { name: '剧毒炮', dmg: 2,   cd: 400,  speed: 120, color: 0x6600aa, size: 0.3, dotDurationPerHit: 2000, dotMaxDuration: 10000, dotDps: 4, poisonVisualColor: 0x8800ff },
     blindgun:{ name: '致盲弹', dmg: 3,   cd: 2000,  speed: 200, color: 0xf2f2f2, size: 0.12, blindDuration: 6000, blindVisionRadius: 35 },
     shield:   { name: '护盾',   dmg: 0,   cd: 99999, speed: 0,   color: 0x88ccff, size: 0.5 },
-    apcannon: { name: '穿甲炮', dmg: 5, cd: 2500, speed: 950, color: 0xcccc00, size: 0.2,
-        piercingSpeed: 1, piercingDmgPerTick: 1, piercingDamageTickMs: 100,
-        slowDurationMs: 700, slowMult: 0.05 },
-    balllightning: { name: '球状闪电', dmg: 1.2, cd: 3500, speed: 20, color: 0xffff88, size: 0.8,
-        durationMs: 5500, damageRadius: 20, damageTickMs: 150,
-        slowDurationMs: 2000, slowMult: 0.25 }
+    apcannon: { name: '穿甲炮', dmg: 5, cd: 2500, speed: 950, color: 0xcccc00, size: 0.5,
+        piercingSpeed: 1, piercingDmgPerTick: 1, piercingDamageTickMs: 200,
+        knockbackDist: 0.35, slowDurationMs: 700, slowMult: 0.10 },
+    balllightning: { name: '球状闪电', dmg: 0.5, cd: 3500, speed: 20, color: 0xffff88, size: 0.8,
+        durationMs: 5500, damageRadius: 15, damageTickMs: 100,
+        slowDurationMs: 2000, slowMult: 0.25 },
+    ghostcannon: { name: '幽灵炮', dmg: 3, cd: 6500, speed: 45, color: 0x88f8ff, size: 0.62,
+        durationMs: 900000, turnRate: 5, hitTickMs: 3000 }
 };
 
 export {

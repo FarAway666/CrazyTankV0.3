@@ -20,7 +20,7 @@ let nextRoundReady = { p1: false, p2: false, p3: false, p4: false };
 function getDefaultConfig() {
     return {
         collisionDamageEnabled: false,
-        unlockAllWeapons: false,
+        unlockAllWeapons: true,
         poisonCircleEnabled: false,
         bulletSpreadEnabled: true,
         minesEnabled: true,
@@ -122,6 +122,14 @@ io.on('connection', (socket) => {
         if (data && data.role != null && data.poisonEndAt != null) {
             socket.broadcast.emit('poison_add', data);
         }
+    });
+
+    // 毒圈状态同步：仅主机上报，广播给其他客户端
+    socket.on('poison_state_sync', (data) => {
+        const reporterRole = players[socket.id];
+        if (reporterRole !== 'p1') return;
+        if (!data || typeof data !== 'object') return;
+        socket.broadcast.emit('poison_state_sync', data);
     });
 
     // 主机权威受击同步：仅接受主机(p1)上报的命中结果，再统一广播给所有客户端
