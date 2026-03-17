@@ -139,7 +139,8 @@ const WEAPONS = {
     blindgun:{ name: '致盲弹', dmg: 3,   cd: 2000,  speed: 200, color: 0xf2f2f2, size: 0.12, blindDuration: 6000, blindVisionRadius: 35 },
     shield:   { name: '护盾',   dmg: 0,   cd: 99999, speed: 0,   color: 0x88ccff, size: 0.5 },
     apcannon: { name: '穿甲炮', dmg: 5, cd: 2500, speed: 950, color: 0xcccc00, size: 0.2,
-        piercingSpeed: 1, piercingDmgPerTick: 1, piercingDamageTickMs: 100 },
+        piercingSpeed: 1, piercingDmgPerTick: 1, piercingDamageTickMs: 100,
+        slowDurationMs: 700, slowMult: 0.05 },
     balllightning: { name: '球状闪电', dmg: 1.2, cd: 3500, speed: 20, color: 0xffff88, size: 0.8,
         durationMs: 5500, damageRadius: 20, damageTickMs: 150,
         slowDurationMs: 2000, slowMult: 0.25 }

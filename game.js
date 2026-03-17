@@ -742,6 +742,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                 poisonEndTime: 0,
                 blindEndTime: 0,
                 balllightningSlowEndTime: 0,
+                apcannonSlowEndTime: 0,
                 inGrass: false,
                 scoping: false,
                 usingSatellite: false,
@@ -2833,7 +2834,8 @@ import { createMobileInputController } from './mobile-runtime.js';
                         if (!p.mesh || !p.alive || p.hp <= 0) continue;
                         const dx = bullet.mesh.position.x - p.mesh.position.x;
                         const dz = bullet.mesh.position.z - p.mesh.position.z;
-                        if (Math.hypot(dx, dz) <= (bullet.damageRadius ?? BALL_LIGHTNING_DAMAGE_RADIUS)) inRange.push(key);
+                        const visualLineRadius = (bullet.damageRadius ?? BALL_LIGHTNING_DAMAGE_RADIUS) + 4;
+                        if (Math.hypot(dx, dz) <= visualLineRadius) inRange.push(key);
                     }
                     if (isHostRole()) {
                         for (const key of inRange) {
@@ -2889,21 +2891,28 @@ import { createMobileInputController } from './mobile-runtime.js';
                 if (bullet.insideTarget) {
                     const targetKey = bullet.insideTarget;
                     const target = players[targetKey];
-                    const insideRadius = 2.2 + (bullet.radius || 0);
+                    const insideRadius = 3.2 + (bullet.radius || 0);
                     const dist = target?.mesh
                         ? Math.hypot(bullet.mesh.position.x - target.mesh.position.x, bullet.mesh.position.z - target.mesh.position.z)
                         : Infinity;
-                    if (!target?.mesh || !target.alive || target.hp <= 0 || dist > insideRadius) {
+                    const now = Date.now();
+                    const holdUntil = bullet.piercingHoldUntil || 0;
+                    if (!target?.mesh || !target.alive || target.hp <= 0 || (dist > insideRadius && now > holdUntil)) {
                         bullet.insideTarget = null;
                         bullet.speed = WEAPONS.apcannon?.speed ?? 950; // 穿透后恢复原速
                     } else if (isHostRole()) {
-                        const now = Date.now();
                         const cfg = WEAPONS.apcannon;
                         const tickMs = cfg?.piercingDamageTickMs ?? 100;
                         if (now - (bullet.piercingLastDamage ?? 0) >= tickMs) {
                             bullet.piercingLastDamage = now;
                             const dmg = cfg?.piercingDmgPerTick ?? 6;
-                            socket.emit('hit_report', { targetRole: targetKey, dmg, weapon: 'apcannon' });
+                            socket.emit('hit_report', {
+                                targetRole: targetKey,
+                                dmg,
+                                weapon: 'apcannon',
+                                slowEndAt: now + (cfg?.slowDurationMs ?? 700),
+                                slowMult: cfg?.slowMult ?? 0.05
+                            });
                         }
                     }
                 }
@@ -2932,7 +2941,14 @@ import { createMobileInputController } from './mobile-runtime.js';
                                 bullet.insideTarget = key;
                                 bullet.speed = cfg?.piercingSpeed ?? 75;
                                 bullet.piercingLastDamage = Date.now();
-                                socket.emit('hit_report', { targetRole: key, dmg: bullet.dmg, weapon: 'apcannon' });
+                                bullet.piercingHoldUntil = Date.now() + 450;
+                                socket.emit('hit_report', {
+                                    targetRole: key,
+                                    dmg: bullet.dmg,
+                                    weapon: 'apcannon',
+                                    slowEndAt: Date.now() + (cfg?.slowDurationMs ?? 700),
+                                    slowMult: cfg?.slowMult ?? 0.05
+                                });
                                 hit = true;
                                 break;
                             }
@@ -3339,7 +3355,10 @@ import { createMobileInputController } from './mobile-runtime.js';
             const scopeMult = player.scoping ? SCOPE_SPEED_MULT : 1;
             const boostMult = player.boosting ? BOOST_MULTIPLIER : 1;
             const ballLightningSlow = player.balllightningSlowEndTime && now < player.balllightningSlowEndTime;
-            const slowMult = ballLightningSlow ? (WEAPONS.balllightning?.slowMult ?? 0.45) : 1;
+            const apcannonSlow = player.apcannonSlowEndTime && now < player.apcannonSlowEndTime;
+            let slowMult = 1;
+            if (ballLightningSlow) slowMult = Math.min(slowMult, WEAPONS.balllightning?.slowMult ?? 0.45);
+            if (apcannonSlow) slowMult = Math.min(slowMult, WEAPONS.apcannon?.slowMult ?? 0.05);
             // 瞄准镜时移动速度为1/3；双击加速时恢复原速；球状闪电击中时减速
             const effectiveSpeedMult = (player.boosting ? boostMult : scopeMult * boostMult) * slowMult;
             const moveSpeed = player.speed * effectiveSpeedMult * deltaSeconds;
@@ -3976,6 +3995,10 @@ import { createMobileInputController } from './mobile-runtime.js';
                         const cur = players[role].balllightningSlowEndTime || 0;
                         players[role].balllightningSlowEndTime = Math.max(cur, data.slowEndAt);
                     }
+                    if (data.weapon === 'apcannon' && typeof data.slowEndAt === 'number') {
+                        const cur = players[role].apcannonSlowEndTime || 0;
+                        players[role].apcannonSlowEndTime = Math.max(cur, data.slowEndAt);
+                    }
                 };
                 socket.on('hit_sync', hitSyncHandler);
             }
@@ -4140,6 +4163,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                     p.poisonEndTime = 0;
                     p.blindEndTime = 0;
                     p.balllightningSlowEndTime = 0;
+                    p.apcannonSlowEndTime = 0;
                     continue;
                 }
                 const tank = createTank(p.color);
@@ -4165,6 +4189,7 @@ import { createMobileInputController } from './mobile-runtime.js';
                 p.poisonEndTime = 0;
                 p.blindEndTime = 0;
                 p.balllightningSlowEndTime = 0;
+                p.apcannonSlowEndTime = 0;
                 p.usingSatellite = false;
                 p.satelliteFiring = false;
                 p.satelliteBeam = null;
@@ -4491,6 +4516,7 @@ import { createMobileInputController } from './mobile-runtime.js';
             if (role === myRole) ensureSpectateTargetRole();
             player.blindEndTime = 0;
             player.balllightningSlowEndTime = 0;
+            player.apcannonSlowEndTime = 0;
             updatePlayerHud(role);
 
             // 将坦克外观替换为黑色方块
